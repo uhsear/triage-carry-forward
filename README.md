@@ -16,7 +16,7 @@ because both are columns that exist in both tables. The new run lists the findin
 different order, with new ObjectIDs, and one finding fewer. The FALSE_POSITIVE note now sits on
 a real error in another block. Nothing fails. The table looks triaged.
 
-The count in a message causes the third version. "14,039 addresses disagree with the zone"
+The count in a message causes the third version. "12,345 addresses disagree with the zone"
 becomes "13,900 addresses disagree with the zone" after a partial fix. A match on the full
 message text sees a different finding, drops the mark, and reports the old finding as fixed.
 The tool printed a clean result and lost the reviewer's work.
@@ -24,7 +24,9 @@ The tool printed a clean result and lost the reviewer's work.
 This tool reads the old table and the new table, builds a fingerprint of each finding from the
 columns you name, and copies the mark to the finding with the same fingerprint. It refuses an
 ObjectID in the key. It masks the numbers in the columns you choose. It refuses to guess when
-one fingerprint is ambiguous. It tells you when a mark vanished because a count moved.
+one fingerprint is ambiguous. It tells you when a mark vanished because the count in a
+message moved, and when a mark could not be applied because the new row already holds a
+different one.
 
 ## What already exists
 
@@ -61,17 +63,20 @@ count-changed   0
 unkeyable       0
 resolved        1  (prior marks whose finding is gone)
 lost marks      3
-  LOST  prior row(s) 2: addr-02 | block 7 | 3 duplicate numbers looks like current row(s) 3 but a number differs. Add that field to --mask if the number is a count.
-  LOST  prior row(s) 3: geom-01 | tract 4 | 8 gaps over 5 m looks like current row(s) 5 but a number differs. Add that field to --mask if the number is a count.
-  LOST  prior row(s) 4: addr-01 | block 9 | 20 addresses disagree with the zone looks like current row(s) 2,4 but a number differs. Add that field to --mask if the number is a count.
+  WARNING  1 prior mark(s) have no matching finding while 5 finding(s) are new. A renamed check or a drifted key looks the same as a fix. Compare them before you trust the file.
+  LOST  prior row(s) 2: addr-02 | block 7 | 3 duplicate numbers looks like current row(s) 3 but a number differs in message. Add that field to --mask if the number is a count.
+  LOST  prior row(s) 3: geom-01 | tract 4 | 8 gaps over 5 m looks like current row(s) 5 but a number differs in message. Add that field to --mask if the number is a count.
+  LOST  prior row(s) 4: addr-01 | block 9 | 20 addresses disagree with the zone looks like current row(s) 2 but a number differs in message. Add that field to --mask if the number is a count.
 dry run: nothing written. Add --out FILE --apply to write the marked copy.
 exit 1
 ```
 
 Without `--mask` three counts changed, so three marks look like fixed findings. The tool
-notices that each vanished finding matches a new one once numbers are ignored, reports the
-marks as lost, and exits 1. A silent "fixed" would have been the disaster above. With the count
-column masked:
+notices that each vanished finding matches a new one once the numbers in the message are
+ignored, reports the marks as lost, and exits 1. A silent "fixed" would have been the disaster
+above. The drift check looks at the last `--key` column, so list the message last. A number in
+an earlier column, such as a block or a parcel, names another feature and is never read as a
+drifted count. With the count column masked:
 
 ```
 $ python triage_carry_forward.py --prior prior.csv --current current.csv --key check_id,feature,message --mask message --out marked.csv --apply
@@ -86,13 +91,16 @@ count-changed   0
 unkeyable       0
 resolved        1  (prior marks whose finding is gone)
 lost marks      0
+  NOTE  3 carried mark(s) sit on a finding whose masked number changed. --mask treats a number as noise, so check that each is the same finding.
 wrote 6 rows to marked.csv
 exit 0
 ```
 
 `marked.csv` is the current table with three marks on the right findings, under the new
 ObjectIDs. The fourth prior mark belonged to a finding that is really gone, so it is reported
-as resolved.
+as resolved. The NOTE line is the cost of masking: the tool cannot tell a moved count from a
+different finding of the same shape (a parcel numbered 1200 and a parcel numbered 1300 share
+one masked key), so it counts every mark that crossed a changed number.
 
 ## Self-test
 
@@ -104,31 +112,35 @@ PASS  normalize folds case and whitespace
 ...
 PASS  copying by OBJECTID marks unrelated findings and the fingerprint does not  <-- pinned defect
 PASS  the OBJECTID 4 mark belongs to a different finding after the rebuild  <-- pinned defect
-PASS  without --mask a changed count drops every mark  <-- pinned defect
-PASS  without --mask the drifted marks are reported lost, not quietly resolved  <-- pinned defect
 ...
 PASS  the footer of a failing harness names the failures and exits 1
 --------------------------------------------------------------------
-146 assertions, 0 failed
+198 assertions, 0 failed
 ```
+
+The block above elides the middle of the run with `...`. The first lines, the last PASS line
+and the footer are verbatim. Run the command to see all 198 lines.
 
 Every fixture is synthetic. The self-test also runs the script as a separate process, writes
 real CSV files in a scratch directory, and reads back the files it wrote. Branch coverage of
-the file is 100 percent, measured with `coverage run --branch triage_carry_forward.py --self-test`.
-The count is 146 on Windows (Python 3.13) and on Linux (Python 3.12). No assertion depends on
-the platform.
+the file is 100 percent, measured with `coverage run --branch triage_carry_forward.py --self-test`
+(692 statements, 152 branches, none missed). One exclusion applies: the last line,
+`if __name__ == "__main__":`, carries `# pragma: no branch`, because its false branch is
+unreachable when the file is run. The count is 198 on Windows (Python 3.9, 3.12 and 3.13) and on
+Linux (Python 3.12). No assertion depends on the platform.
 
 ## Requirements
 
 Python 3.9 or newer, standard library only. No `arcpy`, no network. Nothing to install. The
-file parses with the Python 3.9 grammar. It was run on 3.12 and 3.13, not on 3.9 itself.
+self-test was run on Python 3.9.25, 3.12 and 3.13 on Windows and on 3.12.3 on Linux.
 
 ```
 git clone https://github.com/uhsear/triage-carry-forward.git
 python triage_carry_forward.py --self-test
 ```
 
-Export the findings tables to UTF-8 CSV with your usual tool before you run this one.
+Export the findings tables to comma-delimited UTF-8 CSV with your usual tool before you run
+this one.
 
 ## Usage
 
@@ -153,10 +165,21 @@ Spell flag names in full. `allow_abbrev` is off, so `--ap` is refused and does n
 `--apply`.
 
 Exit codes: 0 every mark carried or resolved, 1 some marks could not be carried, 2 usage
-error, 3 the output could not be written, 4 the key compared nothing.
+error, 3 the output could not be written, 4 the key compared nothing, 5 an unexpected
+internal error (one line on stderr, no traceback). `--self-test` also exits 1 when an
+assertion fails.
+
+Exit 0 can still print a `WARNING` line. It appears when more prior marks resolved than
+carried while new findings appeared, which is also what a renamed check looks like. Read it
+before you trust the file.
 
 A row counts as marked when its status differs from the default status, or its notes are not
-empty. The tool carries the status and the notes together.
+empty. The tool carries the status and the notes together. If your validation tool writes its
+own status into every new row (for example `NEW`), pass it as `--default-status`. Otherwise
+every new row looks reviewed and the prior marks are reported lost.
+
+Blank lines in a CSV are skipped. A character the console cannot encode prints as
+`?` instead of stopping the report.
 
 ## How it decides
 
@@ -169,17 +192,21 @@ For each fingerprint:
 - Only in the new run: `new`. It starts unreviewed.
 - No prior mark on any twin: `unmarked`.
 - One prior mark, same number of rows on both sides: `carried`.
-- The new row already has a mark of its own: `kept-current`. The new file wins.
+- The new row already has a mark of its own: `kept-current`. The new file wins. If its mark
+  differs from the prior mark, the prior mark is counted as lost and the run exits 1.
 - The prior twins carry different marks: `conflict`. Nothing is carried, and the lost marks are counted.
 - The prior mark has a different number of rows now: `count-changed`. The tool cannot tell which twin the mark belonged to, so nothing is carried.
 - Every key cell is blank: `unkeyable`. A marked prior row like this counts as lost.
 
 A prior mark whose fingerprint is gone is `resolved`, unless the same fingerprint appears once
-every number is masked. Then the count drifted, and the mark is reported as lost.
+the numbers in the last `--key` column (and in the `--mask` columns) are masked. Then the
+count drifted, and the mark is reported as lost.
 
-The tool exits 4 and writes nothing, even with `--apply`, when it compared nothing: the new
-file has no rows while the prior file has marks, no new row has a usable key, or no new row
-matches any prior row. A clean exit there would read as "all marks carried".
+The tool exits 4 and writes nothing, even with `--apply`, when it compared nothing and the
+prior file holds at least one mark: the new file has no rows, no new row has a usable key, or
+no new row matches any prior row. A clean exit there would read as "all marks carried". When
+the prior file holds no marks there is nothing to lose, so the run exits 0 and writes the
+output.
 
 ## Why the obvious version is wrong
 
@@ -188,13 +215,17 @@ Matching on `OBJECTID` is the first thing people try. Esri documents the object 
 References). That is a promise of uniqueness within one table. It is not a promise that a
 finding keeps its number when the output table is deleted and built again, and a rebuild that
 lists findings in a different order will not keep it. This tool refuses an ObjectID-style
-column in `--key` (`objectid`, `oid`, `fid`, `rowid`, `source_oid` and similar) unless you
-pass `--allow-oid-key`.
+column in `--key` (`objectid`, `oid`, `fid`, `rowid`, `source_oid`, and the spellings a join
+or an export adds, such as `OBJECTID_1`, `FID_1`, `FID_parcels`, `OBJECT_ID`, `OBJ_ID`)
+unless you pass `--allow-oid-key`.
 
 Matching on the full message is the second attempt. It breaks on the first count that moves.
 Masking fixes that, and masking has a cost: two findings that differ only in a number now
 share a fingerprint. The tool covers that case. If their marks differ it reports `conflict`. If
 the number of twins changes it reports `count-changed`. It does not guess in either case.
+When one prior finding and one new finding share a masked key, the mark is carried, because
+the tool cannot tell a moved count from a different finding. The NOTE line counts those
+carries so that you look at them.
 
 ## What it will not do
 
@@ -210,6 +241,48 @@ the number of twins changes it reports `count-changed`. It does not guess in eit
 - Fingerprints are exact after folding. It does no fuzzy matching.
 - No network and no credentials are involved, so there is no network path to stub.
 
+## Limits
+
+- The 100 percent branch coverage figure relies on one `# pragma: no branch` on the
+  `if __name__` line, described under Self-test. Every other line and branch is measured.
+- Output cells are copied as read. A cell that starts with `=`, `+`, `-`, `@`, tab or CR reaches
+  the output unchanged, so a spreadsheet may run it as a formula. This was reproduced with a
+  Notes cell `=HYPERLINK(...)` in the prior file. The tool does not neutralise it. Open the
+  output in a text editor, or import it as text.
+- With exit 1 and `--apply`, the tool still writes the output file, with the lost marks left as
+  they are in the current file (usually OPEN). Read the LOST lines before you use the file.
+  Exit 4 never writes.
+- Column names for `--key`, `--status-field` and `--notes-field` match exactly. A header that
+  differs in case or has trailing spaces is refused as a usage error.
+- Input must be comma-delimited UTF-8. A cp1252 or UTF-16 export, or a semicolon-delimited
+  file, is refused. The semicolon case reports a missing key column and hides the real cause,
+  so check the delimiter first.
+- The output is UTF-8 without a byte order mark, with LF line ends. Excel on Windows may show
+  non-ASCII text wrongly when you double-click it. Import it as UTF-8.
+- Carried notes lose leading and trailing whitespace. Marks are compared exactly:
+  `false_positive` and `FALSE_POSITIVE` on two prior twins count as different marks and give a
+  `conflict`.
+- Version-like or decimal text in a masked column (for example `v2.1`) is masked as a count.
+  Two findings that differ only in such a number share one fingerprint and fall under the
+  `conflict` or `count-changed` rules.
+- Fingerprints fold with NFKC and case folding only. Zero-width characters and soft hyphens are
+  kept, so two findings that look identical can differ.
+- A `conflict` or `count-changed` verdict counts the prior marks as lost even when the new
+  rows already hold a mark of their own.
+- An unmarked prior file, or a status or notes column that holds no marks, exits 0 with
+  `carried 0` and no warning. The tool cannot tell a file nobody reviewed from the wrong column.
+- A prior file that is a truncated export (some rows missing, not all) reports the missing
+  marked findings as resolved and exits 0. Only an empty current file or zero matches is caught.
+  Compare the row counts yourself.
+- Giving the same file as `--prior` and `--current` is accepted. Everything is carried or
+  unmarked and the run exits 0. The tool does not check that the two files are different runs.
+- `--out` is compared with the inputs by real path. A hard link to an input is not detected.
+  Writing still creates the file exclusively and never overwrites, so no data is lost.
+- A blank line is skipped, so in a one-column file a row whose only cell is empty is skipped
+  too.
+- An unexpected error exits 5 with one line on stderr. Exit 1 from a run means lost marks.
+  Exit 1 from `--self-test` means failed assertions.
+
 ## How each claim was exercised
 
 | Claim | Where it was run |
@@ -224,7 +297,12 @@ the number of twins changes it reports `count-changed`. It does not guess in eit
 | `--out` never overwrites | Self-test, exit 3 assertions, file read back unchanged |
 | `--ap` is refused | Self-test, in process and as a separate process |
 | UTF-8 data and a byte order mark | Self-test, round trip assertions |
-| Linux and Windows agree | 146 assertions on both hosts |
+| A mark the new row cannot take is lost, not dropped silently | Self-test, `kept-current` assertions and the NEW-status CLI run |
+| A fixed finding next to a new one on another block is not a lost mark | Self-test, the feature-number assertions and the block 7 and block 9 CLI run |
+| Joined and exported ObjectID names are refused | Self-test, the OID-style name list |
+| A console that cannot encode a character still gets the report | Self-test, a separate process with `PYTHONIOENCODING=ascii` |
+| An unexpected error exits 5 | Self-test, a forced error in `run` |
+| Linux and Windows agree | 198 assertions on Python 3.9, 3.12 and 3.13 on Windows and 3.12 on Linux |
 
 ## References
 
