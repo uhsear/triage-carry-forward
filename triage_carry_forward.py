@@ -57,6 +57,15 @@ _OID_NAME = re.compile(
     r"^(?:[a-z0-9]*_)?(?:object_?id|obj_id|oid|fid|rowid)(?:_\d+)?$"
     r"|^(?:fid|oid)_[a-z0-9_]+$|^(?:source|src)oid$")
 
+# A spreadsheet runs a text cell as a formula when it starts with one of these (OWASP, CSV
+# Injection): = + - @ tab CR LF, and the full-width forms of the first four.
+_LEAD = r"=+\-@\t\r\n\uff1d\uff0b\uff0d\uff20"
+_GUARDED = re.compile(u"^'*[" + _LEAD + u"]")
+_ESCAPED = re.compile(u"^'+[" + _LEAD + u"]")
+# A plain number is never a formula, so a numeric column stays numeric. \Z, not $: $ also
+# matches before a final newline.
+_PLAIN_NUMBER = re.compile(r"^[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\Z")
+
 OUTCOMES = ("carried", "kept-current", "unmarked", "new", "conflict",
             "count-changed", "unkeyable")
 
@@ -81,6 +90,20 @@ def fingerprint(row, key_fields, mask_fields):
     """Tuple of normalized key cells, or None when every key cell is blank."""
     key = tuple(normalize(row.get(f, ""), f in mask_fields) for f in key_fields)
     return key if any(key) else None
+
+
+def guard_cell(value):
+    """The cell as written to CSV: a text cell that a spreadsheet would run as a formula gets one
+    leading apostrophe. The test also catches apostrophes in front of a formula character, so
+    unguard_cell can strip exactly one apostrophe and a cell that really starts with "'" survives."""
+    if _GUARDED.match(value) and not _PLAIN_NUMBER.match(value):
+        return "'" + value
+    return value
+
+
+def unguard_cell(value):
+    """Inverse of guard_cell: strip one apostrophe that sits in front of a formula character."""
+    return value[1:] if _ESCAPED.match(value) else value
 
 
 def is_oid_name(name):
@@ -331,6 +354,7 @@ def read_rows(path):
             header = next(reader, None)
             if not header:
                 raise UsageError("%s has no header row" % path)
+            header = [unguard_cell(name) for name in header]
             if len(set(header)) != len(header):
                 raise UsageError("%s repeats a column name, so a cell cannot be told apart" % path)
             rows = []
@@ -341,6 +365,7 @@ def read_rows(path):
                     raise UsageError(
                         "%s data row %d has %d cells but the header has %d"
                         % (path, number, len(cells), len(header)))
+                cells = [unguard_cell(cell) for cell in cells]
                 cells = cells + [""] * (len(header) - len(cells))
                 rows.append(dict(zip(header, cells)))
     except UsageError:
@@ -351,12 +376,14 @@ def read_rows(path):
 
 
 def write_rows(path, header, rows):
-    """Create path (never overwrite) and write the rows. Raises OSError."""
+    """Create path (never overwrite) and write the rows. Raises OSError.
+    Every text cell, the header included, goes through guard_cell."""
     # shortcut: a disk error part way leaves a partial file, remove it by hand and re-run.
     with io.open(path, "x", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=header, lineterminator="\n")
-        writer.writeheader()
-        writer.writerows(rows)
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow([guard_cell(name) for name in header])
+        for row in rows:
+            writer.writerow([guard_cell(row.get(name, "")) for name in header])
 
 
 def _same_file(a, b):
@@ -975,6 +1002,105 @@ def self_test():
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
         check(proc.returncode == 2 and not os.path.exists(path("ab.csv")),
               "a unique prefix --ap of --apply is REFUSED by the parser  <-- pinned defect")
+
+        # ---- formula guard: a text cell a spreadsheet would run as a formula is written as text
+        leads = [("equals", "=1+1"), ("plus", "+1+1"), ("minus", "-1+1"), ("at", "@SUM(1)"),
+                 ("tab", "\tx"), ("carriage return", "\rx"), ("line feed", "\nx"),
+                 ("full-width equals", u"＝1+1"), ("full-width plus", u"＋1"),
+                 ("full-width minus", u"－1"), ("full-width at", u"＠x")]
+        for name, text in leads:
+            check(guard_cell(text) == "'" + text, "guard_cell puts one apostrophe in front of a cell that starts with %s" % name)
+            check(unguard_cell("'" + text) == text, "unguard_cell strips that apostrophe from a cell that starts with %s" % name)
+        for text in ("-3", "+3", "-1.5", "-.5", "+7.", "-1e-3", "42", "0", "abc", "", "O'Brien", "x=1", "a-b", " =x"):
+            check(guard_cell(text) == text, "guard_cell leaves %r alone: a plain number or text that is not a formula" % text)
+        for text in ("-3x", "-", "+", "-3\n", "-3\r", "- 3", "-1+2", "--3", "-3-"):
+            check(guard_cell(text) == "'" + text, "guard_cell treats %r as text, not as a number  <-- pinned defect" % text)
+        check(unguard_cell("'abc") == "'abc" and unguard_cell("'") == "'" and unguard_cell("") == "",
+              "unguard_cell leaves an apostrophe that is not in front of a formula character")
+        check(unguard_cell("''=x") == "'=x" and unguard_cell("'=x") == "=x", "unguard_cell strips exactly one apostrophe")
+        check(unguard_cell("'-5") == "-5", "unguard_cell strips the apostrophe in front of a negative number a foreign tool guarded")
+        sample = ["=1+1", "'=x", "''=x", "'hello", "'", "''", "'\t", "-5", "'-5", "@a", "\tz", "\rz", "+", "", "plain", u"＝x",
+                  "-3\n", "'-3\n"]
+        check(all(unguard_cell(guard_cell(t)) == t for t in sample),
+              "guard_cell then unguard_cell returns every sample cell unchanged, apostrophes included  <-- pinned defect")
+        check(all(guard_cell(unguard_cell(guard_cell(t))) == guard_cell(t) for t in sample),
+              "the guard is stable: guarding a cell that was read back gives the cell that was written")
+
+        def raw_cells(name):
+            with io.open(path(name), "r", newline="", encoding="utf-8") as handle:
+                return list(csv.reader(handle))
+
+        # each text field of the output, for each leading character, written and read back
+        for field in ("check_id", "feature", "message", "Status", "Notes"):
+            col = HEADER.index(field)
+            out_name = "guard_%s.csv" % field
+            for name, text in leads:
+                row = _row(1, "c", "f", "m")
+                row[field] = text
+                if os.path.exists(path(out_name)):
+                    os.remove(path(out_name))
+                write_rows(path(out_name), HEADER, [row])
+                check(raw_cells(out_name)[1][col] == "'" + text,
+                      "write_rows guards the %s field when it starts with %s" % (field, name))
+            row = _row(1, "c", "f", "m")
+            row[field] = "'=keep"
+            os.remove(path(out_name))
+            write_rows(path(out_name), HEADER, [row])
+            check(read_rows(path(out_name))[1][0][field] == "'=keep",
+                  "a %s cell that really starts with an apostrophe and a formula character survives the round trip  <-- pinned defect" % field)
+            row[field] = "'plain apostrophe"
+            os.remove(path(out_name))
+            write_rows(path(out_name), HEADER, [row])
+            check(raw_cells(out_name)[1][col] == "'plain apostrophe" and read_rows(path(out_name))[1][0][field] == "'plain apostrophe",
+                  "a %s cell with a leading apostrophe and no formula character is neither changed nor stripped" % field)
+        write_rows(path("num.csv"), HEADER, [_row(-3, "-7", "f", "-12", "+4", "-0.5")])
+        check(raw_cells("num.csv")[1] == ["-3", "-7", "f", "-12", "+4", "-0.5"],
+              "numeric cells, negative or signed, are written as numbers  <-- pinned defect")
+        write_rows(path("hdr.csv"), ["=a", "b"], [{"=a": "1", "b": "2"}])
+        check(raw_cells("hdr.csv")[0] == ["'=a", "b"] and read_rows(path("hdr.csv"))[0] == ["=a", "b"],
+              "a header cell that starts with a formula character is guarded and read back")
+        raises(lambda: read_rows(put("hdupe.csv", "=a,'=a\n1,2\n")), "a header that repeats a name once the guard is stripped is refused")
+        check(read_rows(put("rawf.csv", "k,m\n=1+1,@x\n"))[1] == [{"k": "=1+1", "m": "@x"}],
+              "a cell with no apostrophe is read as it is")
+
+        # the tool reads its own output back: marks and fingerprints must survive a second cycle
+        fp = [_row(1, "f-1", "=cmd|' /c calc'!A1", "+2 gaps", "FALSE_POSITIVE", "=HYPERLINK(\"http://x\")"),
+              _row(2, "f-2", "@home", "-4 over", "DEFERRED", "'=quoted"),
+              _row(3, "f-3", "\tpad", "\rret", "FIXED", "'only an apostrophe"),
+              _row(4, "f-4", "-12", "m", "OPEN", ""),
+              _row(5, "f-5", "ok", "m", "-", "")]
+        blank = [dict(r, Status="OPEN", Notes="") for r in fp]
+        cyc_cur = put("cyc_cur.csv", _csv_text(blank))
+        seed = path("cyc_seed.csv")
+        write_rows(seed, HEADER, fp)
+        cyc_key = ["--key", "check_id,feature,message", "--mask", "message"]
+        out1 = path("cyc1.csv")
+        code, out, err = cli(["--prior", seed, "--current", cyc_cur] + cyc_key + ["--out", out1, "--apply"])
+        check(code == 0 and "carried         4" in out and "lost marks      0" in out,
+              "a prior file the tool wrote itself, with guarded fingerprints, carries every mark on the next run  <-- pinned defect")
+        check([(r["Status"], r["Notes"]) for r in read_rows(out1)[1]] == [(r["Status"], r["Notes"]) for r in fp],
+              "the carried Status and Notes read back exactly, formulas and apostrophes included")
+        raw1 = raw_cells("cyc1.csv")
+        check(raw1[1][2] == "'=cmd|' /c calc'!A1" and raw1[1][5] == "'=HYPERLINK(\"http://x\")",
+              "the output file holds the formula cells as text")
+        check(raw1[2][5] == "''=quoted" and raw1[3][5] == "'only an apostrophe",
+              "a Notes cell that really starts with an apostrophe is not confused with a guard  <-- pinned defect")
+        check(raw1[4][2] == "-12" and raw1[3][2] == "'\tpad" and raw1[3][3] == "'\rret" and raw1[5][4] == "'-",
+              "a numeric text cell stays as it is while tab, carriage return and a lone minus are guarded")
+        out2 = path("cyc2.csv")
+        code, out, err = cli(["--prior", out1, "--current", cyc_cur] + cyc_key + ["--out", out2, "--apply"])
+        check(code == 0 and "carried         4" in out and read_rows(out2)[1] == read_rows(out1)[1],
+              "a second cycle through the tool's own output changes nothing  <-- pinned defect")
+        check(raw_cells("cyc2.csv") == raw_cells("cyc1.csv"), "the second output holds the same cells as the first")
+        out3 = path("cyc3.csv")
+        code, out, err = cli(["--prior", cyc_cur, "--current", cyc_cur] + cyc_key + ["--out", out3, "--apply"])
+        check(raw_cells("cyc3.csv")[1][2] == "'=cmd|' /c calc'!A1" and raw_cells("cyc3.csv")[1][3] == "'+2 gaps",
+              "formula cells that come from the current input are guarded in the output too")
+        bare = put("cyc_bare.csv", _csv_text([dict(r, Status="", Notes="") for r in fp]))
+        out4 = path("cyc4.csv")
+        code, out, err = cli(["--prior", bare, "--current", bare] + cyc_key + ["--default-status", "-", "--out", out4, "--apply"])
+        check(code == 0 and raw_cells("cyc4.csv")[1][4] == "'-" and read_rows(out4)[1][0]["Status"] == "-",
+              "a --default-status that starts with a formula character is guarded in the output")
 
     # ---- the parser
     ap = build_parser()
