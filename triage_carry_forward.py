@@ -1006,8 +1006,8 @@ def self_test():
         # ---- formula guard: a text cell a spreadsheet would run as a formula is written as text
         leads = [("equals", "=1+1"), ("plus", "+1+1"), ("minus", "-1+1"), ("at", "@SUM(1)"),
                  ("tab", "\tx"), ("carriage return", "\rx"), ("line feed", "\nx"),
-                 ("full-width equals", u"＝1+1"), ("full-width plus", u"＋1"),
-                 ("full-width minus", u"－1"), ("full-width at", u"＠x")]
+                 ("full-width equals", u"\uff1d1+1"), ("full-width plus", u"\uff0b1"),
+                 ("full-width minus", u"\uff0d1"), ("full-width at", u"\uff20x")]
         for name, text in leads:
             check(guard_cell(text) == "'" + text, "guard_cell puts one apostrophe in front of a cell that starts with %s" % name)
             check(unguard_cell("'" + text) == text, "unguard_cell strips that apostrophe from a cell that starts with %s" % name)
@@ -1019,7 +1019,7 @@ def self_test():
               "unguard_cell leaves an apostrophe that is not in front of a formula character")
         check(unguard_cell("''=x") == "'=x" and unguard_cell("'=x") == "=x", "unguard_cell strips exactly one apostrophe")
         check(unguard_cell("'-5") == "-5", "unguard_cell strips the apostrophe in front of a negative number a foreign tool guarded")
-        sample = ["=1+1", "'=x", "''=x", "'hello", "'", "''", "'\t", "-5", "'-5", "@a", "\tz", "\rz", "+", "", "plain", u"＝x",
+        sample = ["=1+1", "'=x", "''=x", "'hello", "'", "''", "'\t", "-5", "'-5", "@a", "\tz", "\rz", "+", "", "plain", u"\uff1dx",
                   "-3\n", "'-3\n"]
         check(all(unguard_cell(guard_cell(t)) == t for t in sample),
               "guard_cell then unguard_cell returns every sample cell unchanged, apostrophes included  <-- pinned defect")
