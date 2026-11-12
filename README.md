@@ -468,6 +468,24 @@ carries, and the run exits 1 until you pass `--accept-shifted`.
   exit 5; this was run once on Windows Python 3.13 and not on Linux.
 - The statement that no similar repository exists rests on one GitHub search on 2026-11-11. It
   is not proof.
+- The SarifHub status table (phases 5 and 6 listed as Planned) and the GitHub search are
+  dated 2026-11-11. Neither was checked again later, so read both claims as true on that date only.
+- The 383 count was reproduced again on Windows Python 3.13, 3.10 and 3.9 and on Linux Python
+  3.12 only. Windows 3.11 and 3.12 and Linux 3.9, 3.10, 3.11 and 3.13 were not run again in the
+  last audit.
+- No command-line `--apply` round trip with injected cells was run in the last audit. The same
+  check ran in process with `write_rows` and `read_rows`: tab, CR, `@`, `+` and `-` cells were
+  guarded, `-1,234` was guarded, `'-3` and `'=q` survived the round trip, and a numeric
+  `-4` was left alone.
+- The `raises()` helper in the self-test passes on any `ValueError`, so an unrelated
+  `ValueError` would satisfy such an assertion. Those assertions are weaker than their labels.
+- The `open(..., "x")` exclusive-create path with its `FileExistsError`, and `os.path.realpath`
+  for the `--out` same-file check, have no cited source in References.
+- Identical masked findings that carry different marks are refused as `conflict`, and each such
+  row exits 1. On a synthetic 100,000-row table with 33,334 marked rows, every row came back
+  as `conflict` in 2.4 seconds. A table with many duplicate findings will refuse many marks.
+- Ctrl-C, the closed stdout pipe exit 120, a partial `--out` write, and the hard-link and 8.3
+  bypass of the `--out` check were not run again in the last audit.
 
 ## How each claim was exercised
 
