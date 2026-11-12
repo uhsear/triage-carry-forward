@@ -39,16 +39,18 @@ across runs, so an alert appears once (see References). That is a good design, a
 
 [SarifHub](https://github.com/sapir0507/sarifhub) is a public project that, by its own
 description, tracks findings across SARIF scans with a stable fingerprint and supports triage
-with an audit trail. Its own status table lists fingerprinting and triage as planned work, not
-as shipped features, when I read it. I did not run it.
+with an audit trail. When I read its README on 2026-11-11 (last push 2026-09-25), its own status
+table listed fingerprinting (phase 5) and triage (phase 6) as Planned, not as shipped features.
+The project can change after that date. I did not run it.
 
 Those tools take SARIF. A geodatabase validation tool writes a table, not SARIF, and a flat
 findings table has no source file and line to compute a fingerprint from. This tool takes two
 CSV files and a list of columns you choose. It does not replace SARIF fingerprints. It applies
 the same idea to a flat findings table.
 
-A search of GitHub for this repository name and for "triage carry forward" found no repository
-that does the same job. That is not proof that none exists.
+On 2026-11-11 a search of GitHub for this repository name and for "triage carry forward"
+returned no repository that does the same job, other than this one. That is not proof that none
+exists.
 
 ## What it does
 
@@ -152,24 +154,24 @@ PASS  the OBJECTID 4 mark belongs to a different finding after the rebuild  <-- 
 ...
 PASS  the footer of a failing harness names the failures and exits 1
 --------------------------------------------------------------------
-358 assertions, 0 failed
+369 assertions, 0 failed
 ```
 
 The block above elides the middle of the run with `...`. The first lines, the last PASS line
-and the footer are verbatim. Run the command to see all 358 lines.
+and the footer are verbatim. Run the command to see all 369 lines.
 
 Every fixture is synthetic. The self-test also runs the script as a separate process, writes
 real CSV files in a scratch directory, and reads back the files it wrote. Branch coverage of
 the file is 100 percent, measured with `coverage run --branch triage_carry_forward.py --self-test`
-(841 statements, 178 branches, none missed). One exclusion applies: the last line,
+(881 statements, 182 branches, none missed). One exclusion applies: the last line,
 `if __name__ == "__main__":`, carries `# pragma: no branch`, because its false branch is
-unreachable when the file is run. The count is 358 on Windows (Python 3.9, 3.10, 3.12 and 3.13) and on
-Linux (Python 3.12). No assertion depends on the platform.
+unreachable when the file is run. The count is 369 on Windows (Python 3.11, 3.12 and 3.13) and on
+Linux (Python 3.9, 3.10 and 3.12). No assertion depends on the platform.
 
 ## Requirements
 
 Python 3.9 or newer, standard library only. No `arcpy`, no network. Nothing to install. The
-self-test was run on Python 3.9.25, 3.10.20, 3.12 and 3.13 on Windows and on 3.12.3 on Linux.
+self-test was run, with warnings as errors, on Python 3.11, 3.12 and 3.13 on Windows and on 3.9, 3.10 and 3.12 on Linux.
 
 ```
 git clone https://github.com/uhsear/triage-carry-forward.git
@@ -195,6 +197,7 @@ Check first. Nothing is written without `--apply`.
 | `--accept-shifted` | off | Exit 0 although a mark crossed a changed masked number. Pass it after you checked them. |
 | `--allow-oid-key` | off | Allow an ObjectID-style column in `--key`. |
 | `--allow-empty-current` | off | Accept a current file with no rows when the prior file has marks. |
+| `--allow-no-carry` | off | Accept a run that carries no mark: the prior file holds no marks, or every marked prior finding is gone from the current file. |
 | `--out` | none | New CSV to create. Needs `--apply`. Never overwrites. |
 | `--apply` | off | Write `--out`. Without it nothing is written. |
 | `--self-test` | off | Run the offline assertions and exit. |
@@ -204,7 +207,7 @@ Spell flag names in full. `allow_abbrev` is off, so `--ap` is refused and does n
 
 Exit codes: 0 every mark carried or resolved, 1 some marks could not be carried or a carried
 mark crossed a changed masked number, 2 usage error, 3 the output could not be written, 4 the
-key compared nothing, 5 an unexpected internal error (one line on stderr, no traceback). `--self-test` also exits 1 when an
+run could not tell a fix from a failure (see "How it decides"), 5 an unexpected internal error (one line on stderr, no traceback). `--self-test` also exits 1 when an
 assertion fails.
 
 Exit 0 can still print a `WARNING` line. It appears when resolved prior marks outnumber the
@@ -243,13 +246,21 @@ count drifted, and the mark is reported as lost.
 A key cell is compared with every apostrophe in front of a formula character dropped, so a
 cell the tool wrote with its guard and the same cell in a raw export have one fingerprint.
 
-The tool exits 4 and writes nothing, even with `--apply`, when it compared nothing and the
-prior file holds at least one mark and one of four things holds. The new file has no rows,
-no new row has a usable key, no new row matches any prior row, or no current row matches a
-marked prior row while no mark was reported lost and new findings appeared. The last case
-keeps an unmarked survivor row from making a renamed check look cleaner than a rename with
-none. A clean exit there would read as "all marks carried". When the prior file holds no
-marks there is nothing to lose, so the run exits 0 and writes the output.
+The tool exits 4 and writes nothing, even with `--apply`, when a clean exit would read as "all
+marks carried" and the tool cannot tell that from a failure. Five cases:
+
+- The prior file holds no marked row in the status and notes columns. The reviewer's marks may
+  sit in another column, so the message names `--status-field` and `--notes-field`. If nobody
+  reviewed the prior run, pass `--allow-no-carry`.
+- The current file has no rows (`--allow-empty-current` accepts it).
+- No current row has a usable key.
+- No current row matches any prior row.
+- No current row matches a marked prior row and no mark was reported lost. With new findings
+  this looks like a renamed check or a drifted key, and `--allow-no-carry` does not accept it.
+  With no new findings, every marked finding is gone, which is what a fix and a truncated
+  export both look like. `--allow-no-carry` accepts that one after you compare the row counts.
+  An unmarked survivor row does not stop either refusal, so a rename with one survivor looks
+  no cleaner than a rename with none.
 
 ## Why the obvious version is wrong
 
@@ -304,21 +315,27 @@ carries, and the run exits 1 until you pass `--accept-shifted`.
   loses its first apostrophe the same way on the next carry. Key cells are compared with those
   apostrophes dropped on both sides, so a guarded prior cell and a raw current cell with the
   same text still carry the mark. The copy written from a raw current file still loses one
-  apostrophe on a cell that really starts with `'` and a formula character.
+  apostrophe on a cell that really starts with `'` and a formula character. The strip applies to
+  every column, not only the key and the marks: a raw export cell such as `'-12` or `'=x` in any
+  column is read, and written back, without its apostrophe.
+- The key fold drops every leading apostrophe in front of a formula character. Two findings
+  whose key cells differ only by leading apostrophes before a formula character are treated as
+  the same finding, and fall under the `conflict` or `count-changed` rules.
 - The guard tests only the first character, so a cell that starts with a space, a
   non-breaking space, a zero-width character or another control character before `=`, `+`, `-`
   or `@` is written unchanged; this tool did not test how spreadsheets treat it. The guard
-  covers the characters OWASP lists, plus LF and the full-width forms, and nothing else. A cell
+  covers the characters OWASP lists (LF among them), plus the full-width forms of `=`, `+`, `-`
+  and `@`, and nothing else. A cell
   that starts with `|` or `%` is not guarded.
-- A number with a thousands separator or a sign, such as `-1,234` or `+1,000`, is not a plain
-  number to the guard. It is written as text with a leading apostrophe, so a column that holds
+- A signed number with a thousands separator, such as `-1,234` or `+1,000`, is not a plain
+  number to the guard. A signed number without one, such as `-3` or `+4.5`, is left alone. It is written as text with a leading apostrophe, so a column that holds
   such values does not stay numeric.
 - The apostrophe is visible text when the CSV is opened in some spreadsheets. A guarded cell
   shows a leading `'` there, and the strip on read undoes it only for this tool. OWASP says the
   mitigations it lists, the apostrophe among them, are not reliable in Excel after the file is
   saved and opened again. OWASP recommends a leading tab for Excel-resistant output; this tool
   uses the apostrophe the spec asked for and reads it back, so open the output in Excel only
-  after reading it.
+  after reading it. Excel was not run for this tool.
 - With exit 1 and `--apply`, the tool still writes the output file, with the lost marks left as
   they are in the current file (usually OPEN). Read the LOST lines before you use the file.
   Exit 4 never writes.
@@ -328,9 +345,11 @@ carries, and the run exits 1 until you pass `--accept-shifted`.
   export and a semicolon-delimited file are refused. An ASCII-only cp1252 file is accepted,
   because its bytes are valid UTF-8. The semicolon case reports a missing key column and hides the real cause,
   so check the delimiter first.
-- The output is UTF-8 without a byte order mark, with LF line ends. Excel on Windows may show
-  non-ASCII text wrongly when you double-click it. Excel may misread a UTF-8 file without a
-  byte order mark; use Data > From Text/CSV and choose UTF-8.
+- The output is UTF-8 without a byte order mark, with LF line ends. Excel may show non-ASCII
+  text wrongly when you double-click the file. This was not tested, and the Microsoft page on
+  importing CSV files (in References) says nothing about encodings or the byte order mark, so
+  treat that advice as unverified. The page does document Data > From Text/CSV as the route
+  that lets you inspect how a CSV file is read.
 - Carried notes lose leading and trailing whitespace. A Notes cell that starts with a tab is
   carried without it, so the guard never sees that tab. Marks are compared exactly:
   `false_positive` and `FALSE_POSITIVE` on two prior twins count as different marks and give a
@@ -342,11 +361,10 @@ carries, and the run exits 1 until you pass `--accept-shifted`.
   kept, so two findings that look identical can differ.
 - A `conflict` or `count-changed` verdict counts the prior marks as lost even when the new
   rows already hold a mark of their own.
-- An unmarked prior file, or a status or notes column that holds no marks, exits 0 with
-  `carried 0` and no warning. The tool cannot tell a file nobody reviewed from the wrong column.
-- A prior file that is a truncated export (some rows missing, not all) reports the missing
-  marked findings as resolved and exits 0. Only an empty current file or zero matches is caught.
-  Compare the row counts yourself.
+- A current file that is a truncated export and still matches at least one marked prior finding
+  reports the missing marked findings as resolved and exits 0, because the tool cannot tell a
+  fix from a missing row. Only a current file that lost every marked finding is refused. Compare
+  the `resolved` count and the row counts yourself.
 - Giving the same file as `--prior` and `--current` is accepted. A marked row counts as
   kept-current, an unmarked row as unmarked, and the run exits 0. The tool does not check that
   the two files are different runs.
@@ -355,8 +373,8 @@ carries, and the run exits 1 until you pass `--accept-shifted`.
   LOST and conflict lines; redirect the report to a file when the data is not trusted. This is
   not covered by the self-test.
 - `--out` is opened for exclusive creation, but the tool does not test that the target is a
-  regular file. On Windows, `--out nul` can report success and keep nothing; this is not
-  covered by the self-test.
+  regular file. On Windows, `--out nul` can report success and keep nothing; NUL is a reserved
+  device name there (see References). This is not covered by the self-test.
 - A single CSV cell over Python's csv limit of 131072 characters is refused as exit 2
   `cannot read`, not skipped. The self-test pins both sides of the limit.
 - Python's csv module always quotes a field that holds the delimiter or the quote character.
@@ -366,16 +384,28 @@ carries, and the run exits 1 until you pass `--accept-shifted`.
   documentation. The writer therefore emits each row with a CR LF terminator, which
   quotes CR and LF on every version, and then ends the line with LF. A cell with a bare CR is
   quoted in the file (Python csv documentation, `QUOTE_MINIMAL`, in References).
-- `--out` is compared with the inputs by real path. A hard link to an input is not detected.
-  Writing still creates the file exclusively and never overwrites, so no data is lost.
+- `--out` is compared with the inputs by real path, with case ignored on Windows (Microsoft's
+  file naming rules say not to assume case sensitivity; see References). An `--out` path that
+  reaches an input through a hard link or an 8.3 short name is not detected; creation is still
+  exclusive, so no file is overwritten. Subst drives are not detected either.
+- The CSV reader is strict. An unterminated opening quote in a cell, for example a hand-typed
+  Notes cell that starts with `"`, is refused as exit 2 `cannot read ... unexpected end of
+  data`. Without strict mode Python merged every following row into that cell, and the missing
+  findings were reported as resolved. A quote inside an unquoted cell, such as `5" pipe`, is
+  still read.
+- `--status-field` and `--notes-field` name the only columns that hold marks. A mark in any
+  other column is not seen; the run exits 4 when no row holds a mark in the named columns.
+- `--key` refuses names like `OBJECTID`, `OBJECTID_1` and `FID_parcels`. It does not refuse
+  `OBJECTID1` or a bare `id`, which can also be a row number that a rebuild changes.
 - A blank line is skipped, so in a one-column file a row whose only cell is empty is skipped
   too.
 - An unexpected error exits 5 with one line on stderr. Exit 1 from a run means lost marks or
   an unaccepted shifted carry. Exit 1 from `--self-test` means failed assertions.
-- A header with two blank cells, or a trailing blank header column, is refused as exit 2
-  `repeats a column name`. A data row with a trailing comma is refused as exit 2 `has 7 cells
-  but the header has 6`. Both refusals are loud, and common spreadsheet exports can trigger
-  them.
+- A header with two or more blank cells is refused as exit 2 `repeats a column name`. A header
+  with exactly one blank cell, such as a trailing comma, is accepted, and the blank column is
+  carried through to the output. A data row with a trailing comma under a header that has no
+  blank cell is refused as exit 2 `has 7 cells but the header has 6`. Common spreadsheet
+  exports can trigger either refusal.
 - Only the last `--key` column is tested for a drifted count. With the message listed before
   another column and no `--mask`, a changed count is not recognised as drift, so the mark is
   reported resolved. List the message last.
@@ -403,12 +433,14 @@ carries, and the run exits 1 until you pass `--accept-shifted`.
 | A plain number stays a number | Self-test, `-3`, `+3`, `-1.5`, `-.5` and the other numeric cells, written and read back |
 | The tool reads its own output back and strips exactly one apostrophe, so marks and fingerprints survive a second cycle | Self-test, the two-cycle assertions and the `'=quoted` Notes round trip |
 | A bare CR inside a cell is quoted in the file | Self-test, a byte comparison of the written file, run on Python 3.9, 3.10, 3.12 and 3.13 |
+| Marks in an unnamed column, and a current file that lost every marked finding, exit 4 and write nothing; `--allow-no-carry` accepts them | Self-test, the CLI runs and the `dead_run` assertions |
+| A stray opening quote is refused, not merged into one cell | Self-test, `read_rows` and CLI assertions |
 | A cell over the csv field limit is refused | Self-test, 131073 and 131072 characters |
 | The two demo reports | Run by hand on the two files shown above, Windows, Python 3.13. The write step is pinned by the self-test |
 | A mark carried across a changed masked number exits 1 until `--accept-shifted` | Self-test, `exit_code` and CLI assertions |
 | A rename with one unmarked survivor exits 4, like a rename with none | Self-test, `dead_run` and CLI assertions |
 | A guarded prior key and a raw current key with the same text carry the mark | Self-test, `normalize` and CLI assertions |
-| Linux and Windows agree | 358 assertions on Python 3.9, 3.10, 3.12 and 3.13 on Windows and 3.12 on Linux |
+| Linux and Windows agree | 369 assertions on Python 3.11, 3.12 and 3.13 on Windows and 3.9, 3.10 and 3.12 on Linux |
 
 ## References
 
@@ -420,6 +452,11 @@ carries, and the run exits 1 until you pass `--accept-shifted`.
   https://owasp.org/www-community/attacks/CSV_Injection
 - Python documentation, `csv` module, `QUOTE_MINIMAL` and the `newline=''` rule for files:
   https://docs.python.org/3/library/csv.html
+- Microsoft, Naming Files, Paths, and Namespaces (case sensitivity, reserved device names such as
+  NUL, 8.3 names, hard links):
+  https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file
+- Microsoft, Import or export text (.txt or .csv) files (the Data > From Text/CSV route):
+  https://support.microsoft.com/en-us/office/import-or-export-text-txt-or-csv-files-5250ac4c-663c-47ce-937b-339e391393ba
 - Esri, ArcGIS field data types, the Object ID field:
   https://doc.esri.com/en/arcgis-pro/latest/help/data/geodatabases/overview/arcgis-field-data-types.html
 

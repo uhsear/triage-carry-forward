@@ -16,8 +16,9 @@ A match is only trusted when it is unambiguous. If one fingerprint carries two d
 marks, or appears a different number of times in the two runs, the mark is NOT carried and
 the tool says so and exits 1. A prior mark that the current row cannot take, because the
 current row already holds a different mark, is also lost and also exits 1. A key that
-compares nothing at all exits 4, but only when the prior file holds at least one mark. So does a
-run in which no marked prior finding matches, no mark was reported lost and new findings appeared.
+compares nothing at all exits 4. So does a prior file with no mark in the status and notes
+columns, a run in which no marked prior finding matches while no mark was reported lost, and a
+run in which every marked prior finding is gone (--allow-no-carry accepts the last two).
 A mark carried across a changed number in a --mask field exits 1 until --accept-shifted is passed.
 
     python triage_carry_forward.py --self-test
@@ -290,10 +291,13 @@ def _numbers(values):
     return ",".join(str(v) for v in values)
 
 
-def dead_run(result, n_current, allow_empty_current):
+def dead_run(result, n_current, allow_empty_current, allow_no_carry=False):
     """Why this run compared nothing, or None. A clean exit here would read as 'all carried'."""
     if result["prior_marked"] == 0:
-        return None
+        return None if allow_no_carry else (
+            "the prior file holds no marked row in the status and notes columns, so there is "
+            "nothing to carry. If the reviewer's marks sit in other columns, pass "
+            "--status-field and --notes-field. Pass --allow-no-carry if nobody reviewed it.")
     if n_current == 0:
         return None if allow_empty_current else (
             "the current file has no rows but the prior file has %d marked row(s). "
@@ -304,10 +308,15 @@ def dead_run(result, n_current, allow_empty_current):
     if result["matched"] == 0:
         return ("no current finding matches any prior finding on this key, so nothing was "
                 "compared. The key fields or the --mask list probably drifted.")
-    if result["marked_matched"] == 0 and result["counts"]["new"] and not result["lost_marks"]:
-        return ("no prior mark matches a current finding, no mark was reported lost, and %d "
-                "finding(s) are new, so a fix cannot be told from a renamed check or a drifted "
-                "key. Compare the two files by hand." % result["counts"]["new"])
+    if result["marked_matched"] == 0 and not result["lost_marks"]:
+        if result["counts"]["new"]:
+            return ("no prior mark matches a current finding, no mark was reported lost, and %d "
+                    "finding(s) are new, so a fix cannot be told from a renamed check or a "
+                    "drifted key. Compare the two files by hand." % result["counts"]["new"])
+        if not allow_no_carry:
+            return ("every marked prior finding is gone from the current file, so a fix cannot "
+                    "be told from a truncated export. Compare the row counts. Pass "
+                    "--allow-no-carry if every marked finding was really fixed.")
     return None
 
 
@@ -372,7 +381,7 @@ def read_rows(path):
     """(header, rows) of a UTF-8 CSV. Raises UsageError for a file that cannot be trusted."""
     try:
         with io.open(path, "r", newline="", encoding="utf-8-sig") as handle:
-            reader = csv.reader(handle)
+            reader = csv.reader(handle, strict=True)  # strict: a stray quote is an error, not a merged cell
             header = next(reader, None)
             if not header:
                 raise UsageError("%s has no header row" % path)
@@ -438,6 +447,9 @@ def build_parser():
                     help="exit 0 although a mark crossed a changed masked number (checked by hand)")
     ap.add_argument("--allow-empty-current", action="store_true",
                     help="accept a current file with no rows when the prior file has marks")
+    ap.add_argument("--allow-no-carry", action="store_true",
+                    help="accept a run that carries no mark: the prior file holds no marks, or "
+                         "every marked prior finding is gone")
     ap.add_argument("--out", help="new CSV to create; needs --apply, never overwrites")
     ap.add_argument("--apply", action="store_true",
                     help="write --out. Without it nothing is written.")
@@ -468,7 +480,7 @@ def run(args):
     for line in build_report(result, len(prior), len(current), key_fields, mask_fields,
                              accept_shifted=args.accept_shifted):
         print(line)
-    reason = dead_run(result, len(current), args.allow_empty_current)
+    reason = dead_run(result, len(current), args.allow_empty_current, args.allow_no_carry)
     if reason:
         print("NOTHING COMPARED: " + reason)
         return EXIT_NOTHING
@@ -808,8 +820,10 @@ def self_test():
     r = decide(prior, [], key, mask, "Status", "Notes", "OPEN")
     check(dead_run(r, 0, False) is not None, "an empty current file with prior marks is refused  <-- pinned defect")
     check(dead_run(r, 0, True) is None, "--allow-empty-current accepts it")
-    check(dead_run(decide([_row(1, "C", "f", "m")], [], key, [], "Status", "Notes", "OPEN"), 0, False) is None,
-          "an empty current file is fine when the prior file has no marks")
+    r = decide([_row(1, "C", "f", "m")], [], key, [], "Status", "Notes", "OPEN")
+    check("no marked row" in dead_run(r, 0, False) and "--status-field" in dead_run(r, 0, True)
+          and dead_run(r, 0, False, True) is None,
+          "a prior file with no marks is refused unless --allow-no-carry is passed, whatever the current file holds  <-- pinned defect")
     r = decide(pb, cb, key, [], "Status", "Notes", "OPEN")
     check("non-blank key" in dead_run(r, 1, False), "a current file with only blank keys is refused")
     drift = [_row(1, "OTHER", "x", "y")]
@@ -826,7 +840,11 @@ def self_test():
     check("renamed check" in dead_run(r, 3, False),
           "marks resolved, findings new and one unmarked survivor is refused like the all-renamed run  <-- pinned defect")
     r = decide(ps, [_row(3, "GEOM-02", "f", "m")], key, [], "Status", "Notes", "OPEN")
-    check(dead_run(r, 1, False) is None, "marks resolved with no new finding stays a clean run")
+    check("truncated export" in dead_run(r, 1, False) and dead_run(r, 1, False, True) is None,
+          "every mark resolved, no new finding, is refused like a truncated export unless --allow-no-carry is passed  <-- pinned defect")
+    r = decide(ps, [_row(1, "ADDR-01", "f", "m"), _row(3, "GEOM-02", "f", "m")], key, [], "Status", "Notes", "OPEN")
+    check(r["marked_matched"] == 1 and dead_run(r, 2, False) is None,
+          "one marked finding still matching keeps a partial fix a clean run")
     r = decide(prior, current, key, [], "Status", "Notes", "OPEN")
     check(r["marked_matched"] == 0 and r["lost_marks"] == 3 and dead_run(r, len(current), False) is None,
           "a run that reports lost marks keeps exit 1 instead of the refusal")
@@ -1040,6 +1058,48 @@ def self_test():
         code, out, err = cli(["--prior", "a\x00b", "--current", cur, "--key", "check_id"])
         check(code == 2 and "cannot read" in err, "a path with a NUL character is a usage error, not a traceback")
 
+        # the audit repros: a mark in a column the tool was not told about, a truncated export,
+        # a stray quote and a blank header cell
+        nm_p = put("nm_p.csv", "check_id,feature,message,Status,Notes,Review\nA,f,m,OPEN,,FALSE_POSITIVE x\nB,f,m,OPEN,,\n")
+        nm_c = put("nm_c.csv", "check_id,feature,message,Status,Notes\nA,f,m,,\nB,f,m,,\n")
+        nm_out = path("nm_out.csv")
+        nm_argv = ["--prior", nm_p, "--current", nm_c, "--key", "check_id,feature,message", "--out", nm_out, "--apply"]
+        code, out, err = cli(nm_argv)
+        check(code == 4 and "(0 marked)" in out and "--status-field" in out and not os.path.exists(nm_out),
+              "marks in a column the tool was not told about exit 4, name the flags and write nothing  <-- pinned defect")
+        code, out, err = cli(nm_argv + ["--notes-field", "Review"])
+        check(code == 0 and "carried         1" in out and read_rows(nm_out)[1][0]["Review"] == "FALSE_POSITIVE x",
+              "naming that column as --notes-field carries the mark")
+        nm_out2 = path("nm_out2.csv")
+        code, out, err = cli(nm_argv[:-3] + ["--allow-no-carry", "--out", nm_out2, "--apply"])
+        check(code == 0 and "(0 marked)" in out and os.path.exists(nm_out2),
+              "--allow-no-carry runs a prior file with no marks, exits 0 and writes the output")
+
+        tr_p = put("tr_p.csv", _csv_text(prior))
+        tr_c = put("tr_c.csv", _csv_text([_row(5, "GEOM-02", "tract 4", "overlap")]))
+        tr_out = path("tr_out.csv")
+        tr_argv = ["--prior", tr_p, "--current", tr_c, "--key", "check_id,feature,message", "--out", tr_out, "--apply"]
+        code, out, err = cli(tr_argv)
+        check(code == 4 and "truncated export" in out and "resolved        4" in out and not os.path.exists(tr_out),
+              "a current file that lost every marked finding exits 4 and writes nothing  <-- pinned defect")
+        code, out, err = cli(tr_argv + ["--allow-no-carry"])
+        check(code == 0 and os.path.exists(tr_out), "--allow-no-carry accepts the same run, exits 0 and writes the output")
+
+        sq_p = put("sq_p.csv", 'check_id,feature,message,Status,Notes\nA,f,m,FIXED,"oops\nB,f,m,OPEN,\nC,f,m,OPEN,\n')
+        sq_c = put("sq_c.csv", "check_id,feature,message,Status,Notes\nA,f,m,,\nB,f,m,,\nC,f,m,,\n")
+        raises(lambda: read_rows(sq_p), "an unterminated opening quote is refused, not merged into one cell  <-- pinned defect")
+        code, out, err = cli(["--prior", sq_p, "--current", sq_c, "--key", "check_id,feature,message"])
+        check(code == 2 and "cannot read" in err, "the stray quote is a usage error through the CLI")
+        check(read_rows(put("q_ok.csv", 'k,m\na,"x ""y"" z"\nb,5" pipe\n'))[1] == [{"k": "a", "m": 'x "y" z'}, {"k": "b", "m": '5" pipe'}],
+              "a doubled quote and a quote inside an unquoted cell are still read")
+
+        bh_p = put("bh_p.csv", "check_id,feature,message,Status,Notes,\nC,f,m,FIXED,x,\n")
+        bh_c = put("bh_c.csv", "check_id,feature,message,Status,Notes,\nC,f,m,,,\n")
+        bh_out = path("bh_out.csv")
+        code, out, err = cli(["--prior", bh_p, "--current", bh_c, "--key", "check_id,feature,message", "--out", bh_out, "--apply"])
+        check(code == 0 and read_rows(bh_out)[0][-1] == "" and read_rows(bh_out)[1][0]["Status"] == "FIXED",
+              "a single blank header cell is accepted and carried through; only a repeated name is refused  <-- pinned defect")
+
         # a character the console cannot encode must not crash the report
         enc_p = put("enc_p.csv", u"k,Status,Notes\ngap \u2265 5 m,DONE,n\nsteady,OPEN,\n")
         enc_c = put("enc_c.csv", u"k,Status,Notes\ngap \u2265 6 m,,\nsteady,,\n")
@@ -1071,7 +1131,8 @@ def self_test():
         code, out, err = cli(["--prior", pri, "--current", cur, "--key", "OBJECTID"])
         check(code == 2 and "--allow-oid-key" in err, "an OBJECTID --key is a usage error through the CLI")
         code, out, err = cli(["--prior", pri, "--current", cur, "--key", "OBJECTID,check_id", "--allow-oid-key"])
-        check(code in (0, 1, 4), "--allow-oid-key lets the run proceed")
+        check(code == 1 and "carried         1" in out and "lost marks      1" in out,
+              "--allow-oid-key lets the run proceed: the rebuilt ObjectID 4 carries a mark onto an unrelated finding")
         code, out, err = cli(["--prior", path("missing.csv"), "--current", cur, "--key", "check_id"])
         check(code == 2 and "cannot read" in err, "a missing --prior file is a usage error")
 
@@ -1170,6 +1231,10 @@ def self_test():
         write_rows(path("hdr.csv"), ["=a", "b"], [{"=a": "1", "b": "2"}])
         check(raw_cells("hdr.csv")[0] == ["'=a", "b"] and read_rows(path("hdr.csv"))[0] == ["=a", "b"],
               "a header cell that starts with a formula character is guarded and read back")
+        ex_header = HEADER + ["Reviewer"]
+        write_rows(path("extra.csv"), ex_header, [dict(_row(1, "c", "f", "m"), Reviewer="=SUM(A1)")])
+        check(raw_cells("extra.csv")[1][-1] == "'=SUM(A1)" and read_rows(path("extra.csv"))[1][0]["Reviewer"] == "=SUM(A1)",
+              "a free-text column that is neither key nor mark is guarded and read back")
         write_rows(path("cr.csv"), ["k", "m"], [{"k": "a", "m": "x\ry"}, {"k": "b", "m": "\rz"}])
         with io.open(path("cr.csv"), "rb") as handle:
             check(handle.read() == b'k,m\na,"x\ry"\nb,"\'\rz"\n',
@@ -1210,12 +1275,12 @@ def self_test():
               "a second cycle through the tool's own output changes nothing  <-- pinned defect")
         check(raw_cells("cyc2.csv") == raw_cells("cyc1.csv"), "the second output holds the same cells as the first")
         out3 = path("cyc3.csv")
-        code, out, err = cli(["--prior", cyc_cur, "--current", cyc_cur] + cyc_key + ["--out", out3, "--apply"])
+        code, out, err = cli(["--prior", cyc_cur, "--current", cyc_cur] + cyc_key + ["--allow-no-carry", "--out", out3, "--apply"])
         check(raw_cells("cyc3.csv")[1][2] == "'=cmd|' /c calc'!A1" and raw_cells("cyc3.csv")[1][3] == "'+2 gaps",
               "formula cells that come from the current input are guarded in the output too")
         bare = put("cyc_bare.csv", _csv_text([dict(r, Status="", Notes="") for r in fp]))
         out4 = path("cyc4.csv")
-        code, out, err = cli(["--prior", bare, "--current", bare] + cyc_key + ["--default-status", "-", "--out", out4, "--apply"])
+        code, out, err = cli(["--prior", bare, "--current", bare] + cyc_key + ["--allow-no-carry", "--default-status", "-", "--out", out4, "--apply"])
         check(code == 0 and raw_cells("cyc4.csv")[1][4] == "'-" and read_rows(out4)[1][0]["Status"] == "-",
               "a --default-status that starts with a formula character is guarded in the output")
 
