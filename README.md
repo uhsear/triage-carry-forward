@@ -38,7 +38,8 @@ References). That is a good design, and if your findings are SARIF you should us
 
 [SarifHub](https://github.com/sapir0507/sarifhub) is a public project that, by its own
 description, tracks findings across SARIF scans with a stable fingerprint and supports triage
-with audited decisions. I did not run it.
+with an audit trail. Its own status table lists fingerprinting and triage as planned work, not
+as shipped features, when I read it. I did not run it.
 
 Those tools take SARIF. A geodatabase validation tool writes a table, not SARIF, and a flat
 findings table has no source file and line to compute a fingerprint from. This tool takes two
@@ -49,6 +50,32 @@ A search of GitHub for this repository name and for "triage carry forward" found
 that does the same job. That is not proof that none exists.
 
 ## What it does
+
+The two demo files below are the whole input of the next two runs. Save them as `prior.csv`
+and `current.csv`. `prior.csv` holds four reviewer marks:
+
+```
+OBJECTID,check_id,feature,message,Status,Notes
+1,ADDR-01,block 7,"12,345 addresses disagree with the zone",OPEN,
+2,ADDR-02,block 7,3 duplicate numbers,FALSE_POSITIVE,"known, vendor data"
+3,GEOM-01,tract 4,8 gaps over 5 m,DEFERRED,next quarter
+4,ADDR-01,block 9,20 addresses disagree with the zone,FIXED,corrected
+5,GEOM-02,tract 4,overlap,OPEN,
+6,ADDR-03,block 2,6 unnamed streets,FALSE_POSITIVE,private road
+```
+
+`current.csv` is the rebuilt table: new order, new ObjectIDs, three counts moved, one finding
+fixed and one new:
+
+```
+OBJECTID,check_id,feature,message,Status,Notes
+1,GEOM-02,tract 4,overlap,OPEN,
+2,ADDR-01,block 9,19 addresses disagree with the zone,OPEN,
+3,ADDR-02,block 7,4 duplicate numbers,OPEN,
+4,ADDR-01,block 7,"13,900 addresses disagree with the zone",OPEN,
+5,GEOM-01,tract 4,7 gaps over 5 m,OPEN,
+6,NEW-01,block 1,something new,OPEN,
+```
 
 ```
 $ python triage_carry_forward.py --prior prior.csv --current current.csv --key check_id,feature,message
@@ -115,24 +142,24 @@ PASS  the OBJECTID 4 mark belongs to a different finding after the rebuild  <-- 
 ...
 PASS  the footer of a failing harness names the failures and exits 1
 --------------------------------------------------------------------
-198 assertions, 0 failed
+337 assertions, 0 failed
 ```
 
 The block above elides the middle of the run with `...`. The first lines, the last PASS line
-and the footer are verbatim. Run the command to see all 198 lines.
+and the footer are verbatim. Run the command to see all 337 lines.
 
 Every fixture is synthetic. The self-test also runs the script as a separate process, writes
 real CSV files in a scratch directory, and reads back the files it wrote. Branch coverage of
 the file is 100 percent, measured with `coverage run --branch triage_carry_forward.py --self-test`
-(692 statements, 152 branches, none missed). One exclusion applies: the last line,
+(794 statements, 172 branches, none missed). One exclusion applies: the last line,
 `if __name__ == "__main__":`, carries `# pragma: no branch`, because its false branch is
-unreachable when the file is run. The count is 198 on Windows (Python 3.9, 3.12 and 3.13) and on
+unreachable when the file is run. The count is 337 on Windows (Python 3.9, 3.10, 3.11, 3.12 and 3.13) and on
 Linux (Python 3.12). No assertion depends on the platform.
 
 ## Requirements
 
 Python 3.9 or newer, standard library only. No `arcpy`, no network. Nothing to install. The
-self-test was run on Python 3.9.25, 3.12 and 3.13 on Windows and on 3.12.3 on Linux.
+self-test was run on Python 3.9.25, 3.10.20, 3.11.15, 3.12 and 3.13 on Windows and on 3.12.3 on Linux.
 
 ```
 git clone https://github.com/uhsear/triage-carry-forward.git
@@ -245,10 +272,30 @@ carries so that you look at them.
 
 - The 100 percent branch coverage figure relies on one `# pragma: no branch` on the
   `if __name__` line, described under Self-test. Every other line and branch is measured.
-- Output cells are copied as read. A cell that starts with `=`, `+`, `-`, `@`, tab or CR reaches
-  the output unchanged, so a spreadsheet may run it as a formula. This was reproduced with a
-  Notes cell `=HYPERLINK(...)` in the prior file. The tool does not neutralise it. Open the
-  output in a text editor, or import it as text.
+- Formula guard. The input files are untrusted, so every text cell of the output, the header
+  included, is checked before it is written. A cell whose first character is `=`, `+`, `-`,
+  `@`, tab, CR or LF, or the full-width form of `=`, `+`, `-` or `@`, gets one leading
+  apostrophe (OWASP, CSV Injection, in References, which lists all of these characters). A plain number such as `-3` or `+4.5` is left alone, so a
+  numeric column stays numeric. When the tool reads a file, it strips one apostrophe that sits
+  in front of such a character. A round trip of the tool's own output therefore changes
+  nothing, and a Notes cell that really starts with `'` survives: `'=quoted` is written as
+  `''=quoted` and read back as `'=quoted`. The self-test pins each guarded field, tab and CR
+  included.
+- The strip on read cannot tell a guard from a real apostrophe. It removes one apostrophe from
+  any cell that starts with `'` and then a formula character, in `--prior` and in `--current`,
+  whoever wrote the file. A cell `'=x` in a raw export therefore reads as `=x`, and `'-12`
+  reads as the number `-12`. A prior file written by an older, unguarded version of this tool
+  loses its first apostrophe the same way on the next carry. Both files get the same
+  treatment, so fingerprints still agree.
+- A leading space, a non-breaking space or a zero-width character before `=`, `+`, `-` or `@`
+  is not guarded, because the guard tests only the first character and a spreadsheet reads
+  such a cell as text. The guard covers the OWASP list plus LF and the full-width forms.
+- A number with a thousands separator or a sign, such as `-1,234` or `+1,000`, is not a plain
+  number to the guard. It is written as text with a leading apostrophe, so a column that holds
+  such values does not stay numeric.
+- The apostrophe is visible text when the CSV is opened in some spreadsheets. A guarded cell
+  shows a leading `'` there, and the strip on read undoes it only for this tool. OWASP notes that
+  the apostrophe is not reliable in Excel after the file is saved and opened again.
 - With exit 1 and `--apply`, the tool still writes the output file, with the lost marks left as
   they are in the current file (usually OPEN). Read the LOST lines before you use the file.
   Exit 4 never writes.
@@ -259,7 +306,8 @@ carries so that you look at them.
   so check the delimiter first.
 - The output is UTF-8 without a byte order mark, with LF line ends. Excel on Windows may show
   non-ASCII text wrongly when you double-click it. Import it as UTF-8.
-- Carried notes lose leading and trailing whitespace. Marks are compared exactly:
+- Carried notes lose leading and trailing whitespace. A Notes cell that starts with a tab is
+  carried without it, so the guard never sees that tab. Marks are compared exactly:
   `false_positive` and `FALSE_POSITIVE` on two prior twins count as different marks and give a
   `conflict`.
 - Version-like or decimal text in a masked column (for example `v2.1`) is masked as a count.
@@ -274,8 +322,22 @@ carries so that you look at them.
 - A prior file that is a truncated export (some rows missing, not all) reports the missing
   marked findings as resolved and exits 0. Only an empty current file or zero matches is caught.
   Compare the row counts yourself.
-- Giving the same file as `--prior` and `--current` is accepted. Everything is carried or
-  unmarked and the run exits 0. The tool does not check that the two files are different runs.
+- Giving the same file as `--prior` and `--current` is accepted. A marked row counts as
+  kept-current, an unmarked row as unmarked, and the run exits 0. The tool does not check that
+  the two files are different runs.
+- The report prints key cells as they appear in the data, control and escape characters
+  included. A hostile cell can change a terminal that interprets them. Redirect the report to a
+  file when the data is not trusted. This was run with an escape sequence in a key cell.
+- `--out` is opened for exclusive creation, but the tool does not test that the target is a
+  regular file. On Windows `--out nul` prints `wrote N rows` and keeps nothing. This was
+  observed by hand on Windows, not in the self-test, because it depends on the platform.
+- A single CSV cell over Python's csv limit of 131072 characters is refused as exit 2
+  `cannot read`, not skipped. The self-test pins both sides of the limit.
+- Python's csv module always quotes a field that holds the delimiter or the quote character.
+  On Python 3.9 and 3.10 it quotes a line break only when the break is part of the line
+  terminator, so a bare CR was left unquoted and split the record. The writer therefore emits each row with a CR LF terminator, which
+  quotes CR and LF on every version, and then ends the line with LF. A cell with a bare CR is
+  quoted in the file (Python csv documentation, `QUOTE_MINIMAL`, in References).
 - `--out` is compared with the inputs by real path. A hard link to an input is not detected.
   Writing still creates the file exclusively and never overwrites, so no data is lost.
 - A blank line is skipped, so in a one-column file a row whose only cell is empty is skipped
@@ -302,7 +364,13 @@ carries so that you look at them.
 | Joined and exported ObjectID names are refused | Self-test, the OID-style name list |
 | A console that cannot encode a character still gets the report | Self-test, a separate process with `PYTHONIOENCODING=ascii` |
 | An unexpected error exits 5 | Self-test, a forced error in `run` |
-| Linux and Windows agree | 198 assertions on Python 3.9, 3.12 and 3.13 on Windows and 3.12 on Linux |
+| A text cell that starts with `=`, `+`, `-`, `@`, tab, CR or LF is written with one apostrophe, in every output field and the header | Self-test, one assertion per field and per leading character, then read back from the file |
+| A plain number stays a number | Self-test, `-3`, `+3`, `-1.5`, `-.5` and the other numeric cells, written and read back |
+| The tool reads its own output back and strips exactly one apostrophe, so marks and fingerprints survive a second cycle | Self-test, the two-cycle assertions and the `'=quoted` Notes round trip |
+| A bare CR inside a cell is quoted in the file | Self-test, a byte comparison of the written file, run on Python 3.9 through 3.13 |
+| A cell over the csv field limit is refused | Self-test, 131073 and 131072 characters |
+| The two demo reports | Run by hand on the two files shown above, Windows, Python 3.13. The write step is pinned by the self-test |
+| Linux and Windows agree | 337 assertions on Python 3.9, 3.10, 3.11, 3.12 and 3.13 on Windows and 3.12 on Linux |
 
 ## References
 
@@ -310,6 +378,10 @@ carries so that you look at them.
   (`baselineState`): https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/sarif-v2.1.0-errata01-os-complete.html
 - GitHub, SARIF support for code scanning, `partialFingerprints`:
   https://docs.github.com/en/code-security/code-scanning/integrating-with-code-scanning/sarif-support-for-code-scanning
+- OWASP, CSV Injection (the list of leading characters, the single quote prefix and its limits):
+  https://owasp.org/www-community/attacks/CSV_Injection
+- Python documentation, `csv` module, `QUOTE_MINIMAL` and the `newline=''` rule for files:
+  https://docs.python.org/3/library/csv.html
 - Esri, ArcGIS field data types, the Object ID field:
   https://doc.esri.com/en/arcgis-pro/latest/help/data/geodatabases/overview/arcgis-field-data-types.html
 

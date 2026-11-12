@@ -378,12 +378,18 @@ def read_rows(path):
 def write_rows(path, header, rows):
     """Create path (never overwrite) and write the rows. Raises OSError.
     Every text cell, the header included, goes through guard_cell."""
-    # shortcut: a disk error part way leaves a partial file, remove it by hand and re-run.
+    # shortcut: a disk error part way leaves a partial file, remove it by hand and re-run; write to a temp name and rename if an unattended job ever consumes the file.
     with io.open(path, "x", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle, lineterminator="\n")
-        writer.writerow([guard_cell(name) for name in header])
-        for row in rows:
-            writer.writerow([guard_cell(row.get(name, "")) for name in header])
+        # Python 3.9 and 3.10 quote a field only for a character of the line terminator, so
+        # "\n" alone leaves a bare CR unquoted and splits the record. Write each row with
+        # "\r\n", which quotes CR and LF on every version, then end the line with "\n".
+        line = io.StringIO()
+        writer = csv.writer(line, lineterminator="\r\n")
+        for cells in [header] + [[row.get(name, "") for name in header] for row in rows]:
+            line.seek(0)
+            line.truncate()
+            writer.writerow([guard_cell(cell) for cell in cells])
+            handle.write(line.getvalue()[:-2] + "\n")
 
 
 def _same_file(a, b):
@@ -495,7 +501,7 @@ def _row(oid, check, feature, message, status="OPEN", notes=""):
 
 def _csv_text(rows, header=HEADER):
     out = io.StringIO()
-    writer = csv.DictWriter(out, fieldnames=header, lineterminator="\n")
+    writer = csv.DictWriter(out, fieldnames=header, lineterminator="\r\n")
     writer.writeheader()
     writer.writerows(rows)
     return out.getvalue()
@@ -586,6 +592,8 @@ def self_test():
     check(mark_of(_row(1, "c", "f", "m", "", ""), "Status", "Notes", "OPEN") is None, "a blank status with no notes is unmarked")
     check(mark_of(_row(1, "c", "f", "m", "FALSE_POSITIVE"), "Status", "Notes", "OPEN") == ("FALSE_POSITIVE", ""), "a status change is a mark")
     check(mark_of(_row(1, "c", "f", "m", "OPEN", " see ticket "), "Status", "Notes", "OPEN") == ("OPEN", "see ticket"), "notes alone are a mark and are stripped")
+    check(mark_of(_row(1, "c", "f", "m", "OPEN", "\tnote"), "Status", "Notes", "OPEN") == ("OPEN", "note"),
+          "a Notes cell that starts with a tab is carried without the tab")
     check(mark_of({}, "Status", "Notes", "OPEN") is None, "a row without the columns is unmarked")
     check(mark_of(_row(1, "c", "f", "m", "   ", "  "), "Status", "Notes", "OPEN") is None, "a whitespace-only status is not a mark")
 
@@ -819,7 +827,7 @@ def self_test():
             return os.path.join(tmp, name)
 
         def put(name, text, mode="w", encoding="utf-8"):
-            with io.open(path(name), mode, newline="", encoding=encoding) as handle:
+            with io.open(path(name), mode, newline=None if "b" in mode else "", encoding=encoding) as handle:
                 handle.write(text)
             return path(name)
 
@@ -830,7 +838,18 @@ def self_test():
         raises(lambda: read_rows(put("dup.csv", "a,a\n1,2\n")), "a repeated column name is refused")
         raises(lambda: read_rows(put("empty.csv", "")), "an empty file is refused")
         raises(lambda: read_rows(path("missing.csv")), "a missing file is refused")
-        raises(lambda: read_rows(put("bad.csv", b"a,b\n\xff\xfe,2\n", mode="wb", encoding=None)), "a file that is not UTF-8 is refused")
+        put("bad.csv", b"a,b\n\xff\xfe,2\n", mode="wb", encoding=None)
+        check(os.path.exists(path("bad.csv")), "the non-UTF-8 fixture file exists  <-- pinned defect")
+        bad_message = ""
+        try:
+            read_rows(path("bad.csv"))
+        except UsageError as exc:
+            bad_message = str(exc)
+        check("cannot read" in bad_message, "a file that is not UTF-8 is refused as cannot read")
+        put("wide.csv", "a,b\n" + "x" * 131073 + ",1\n")
+        raises(lambda: read_rows(path("wide.csv")), "a cell over the csv field limit of 131072 characters is refused, not skipped")
+        check(len(read_rows(put("edge.csv", "a,b\n" + "x" * 131072 + ",1\n"))[1][0]["a"]) == 131072,
+              "a cell of exactly 131072 characters is read")
 
         pri = put("prior.csv", _csv_text(prior))
         cur = put("current.csv", _csv_text(current))
@@ -1015,6 +1034,10 @@ def self_test():
             check(guard_cell(text) == text, "guard_cell leaves %r alone: a plain number or text that is not a formula" % text)
         for text in ("-3x", "-", "+", "-3\n", "-3\r", "- 3", "-1+2", "--3", "-3-"):
             check(guard_cell(text) == "'" + text, "guard_cell treats %r as text, not as a number  <-- pinned defect" % text)
+        for text in ("-1,234", "+1,000"):
+            check(guard_cell(text) == "'" + text, "guard_cell writes %r as text: a thousands separator is not a plain number" % text)
+        for text in (chr(160) + "=x", "  +x", chr(0x200b) + "=x"):
+            check(guard_cell(text) == text, "guard_cell does not guard %r: only the first character is tested" % text)
         check(unguard_cell("'abc") == "'abc" and unguard_cell("'") == "'" and unguard_cell("") == "",
               "unguard_cell leaves an apostrophe that is not in front of a formula character")
         check(unguard_cell("''=x") == "'=x" and unguard_cell("'=x") == "=x", "unguard_cell strips exactly one apostrophe")
@@ -1059,6 +1082,12 @@ def self_test():
         write_rows(path("hdr.csv"), ["=a", "b"], [{"=a": "1", "b": "2"}])
         check(raw_cells("hdr.csv")[0] == ["'=a", "b"] and read_rows(path("hdr.csv"))[0] == ["=a", "b"],
               "a header cell that starts with a formula character is guarded and read back")
+        write_rows(path("cr.csv"), ["k", "m"], [{"k": "a", "m": "x\ry"}, {"k": "b", "m": "\rz"}])
+        with io.open(path("cr.csv"), "rb") as handle:
+            check(handle.read() == b'k,m\na,"x\ry"\nb,"\'\rz"\n',
+                  "a bare CR inside a cell is quoted in the file on every Python version  <-- pinned defect")
+        check(read_rows(path("cr.csv"))[1] == [{"k": "a", "m": "x\ry"}, {"k": "b", "m": "\rz"}],
+              "a cell with a bare CR reads back as one cell")
         raises(lambda: read_rows(put("hdupe.csv", "=a,'=a\n1,2\n")), "a header that repeats a name once the guard is stripped is refused")
         check(read_rows(put("rawf.csv", "k,m\n=1+1,@x\n"))[1] == [{"k": "=1+1", "m": "@x"}],
               "a cell with no apostrophe is read as it is")
