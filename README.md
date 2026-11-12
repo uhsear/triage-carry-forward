@@ -401,12 +401,16 @@ carries, and the run exits 1 until you pass `--accept-shifted`.
 - Giving the same file as `--prior` and `--current` is accepted. A marked row counts as
   kept-current, an unmarked row as unmarked, and the run exits 0. The tool does not check that
   the two files are different runs.
-- The report prints key cells as they appear in the data, control and escape characters
-  included. A key cell that holds a control or escape character is printed unchanged in the
-  LOST and conflict lines, up to 60 characters of each cell. A key column that holds a secret,
-  such as a connection string in a message, sends that text to the terminal and any log;
-  redirect or scrub the report when key columns may hold secrets. This is not covered by the
-  self-test.
+- The report prints the fingerprint of a key, not the cell text as it appears in the data. The
+  fingerprint is NFKC folded, case folded and whitespace collapsed, and a masked column shows
+  `#` where digits were, so `ADDR-02` prints as `addr-02`. A key cell that holds a control or
+  escape character may still reach the terminal. The LOST and conflict lines cut the joined key
+  to 60 characters, not each cell. A key column that holds a secret, such as a connection
+  string in a message, sends that text to the terminal and any log; redirect or scrub the
+  report when key columns may hold secrets. This is not covered by the self-test.
+- The LOST line for a current row that already holds a different mark prints that row's Status
+  and Notes text in full, not cut to 60 characters, so a long or sensitive Notes cell reaches
+  the terminal and any log unchanged.
 - `--out` is opened for exclusive creation, but the tool does not test that the target is a
   regular file. On Windows, `--out nul` can report success and keep nothing; NUL is a reserved
   device name there (see References). This is not covered by the self-test.
@@ -452,6 +456,18 @@ carries, and the run exits 1 until you pass `--accept-shifted`.
   Both were run on a one-cell file.
 - A partial write leaves a partial `--out` file with exit 3, and the next run refuses it as
   already existing. Delete the partial file before you run again.
+- A header cell that starts with a formula character is also written with an apostrophe, so a
+  column named `-score` or `=x` reaches other tools as `'-score`. A downstream tool that matches
+  column names sees the apostrophe unless it uses this reader.
+- A drift case with no matching key at all, such as a single prior `A|f|12 addresses` mark
+  against a current `A|f|13 addresses` without `--mask`, prints the LOST line and then exits 4
+  with `NOTHING COMPARED`, not 1. It is a refusal, not a false clean, and the message names
+  `--mask`.
+- Ctrl-C is not handled, so Python prints a traceback. A closed stdout pipe on Windows ended a
+  large report with exit 120 and `Exception ignored on flushing sys.stdout`, not the tool's own
+  exit 5; this was run once on Windows Python 3.13 and not on Linux.
+- The statement that no similar repository exists rests on one GitHub search on 2026-11-11. It
+  is not proof.
 
 ## How each claim was exercised
 
