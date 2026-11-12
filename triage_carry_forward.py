@@ -16,15 +16,17 @@ A match is only trusted when it is unambiguous. If one fingerprint carries two d
 marks, or appears a different number of times in the two runs, the mark is NOT carried and
 the tool says so and exits 1. A prior mark that the current row cannot take, because the
 current row already holds a different mark, is also lost and also exits 1. A key that
-compares nothing at all exits 4, but only when the prior file holds at least one mark.
+compares nothing at all exits 4, but only when the prior file holds at least one mark. So does a
+run in which no marked prior finding matches, no mark was reported lost and new findings appeared.
+A mark carried across a changed number in a --mask field exits 1 until --accept-shifted is passed.
 
     python triage_carry_forward.py --self-test
     python triage_carry_forward.py --prior old.csv --current new.csv --key check_id,feature,message --mask message
     python triage_carry_forward.py --prior old.csv --current new.csv --key check_id,feature,message --mask message --out new_marked.csv --apply
 
 Without --apply nothing is written. Exit codes: 0 every mark carried or resolved, 1 some
-marks could not be carried, 2 usage error, 3 the output could not be written, 4 the key
-compared nothing, 5 an unexpected internal error.
+marks could not be carried or a carried mark crossed a changed masked number, 2 usage error,
+3 the output could not be written, 4 the key compared nothing, 5 an unexpected internal error.
 """
 from __future__ import print_function
 
@@ -62,6 +64,8 @@ _OID_NAME = re.compile(
 _LEAD = r"=+\-@\t\r\n\uff1d\uff0b\uff0d\uff20"
 _GUARDED = re.compile(u"^'*[" + _LEAD + u"]")
 _ESCAPED = re.compile(u"^'+[" + _LEAD + u"]")
+# Apostrophes in front of a formula character, dropped from a key cell before it is compared.
+_GUARD_FOLD = re.compile(u"^'+(?=[" + _LEAD + u"])")
 # A plain number is never a formula, so a numeric column stays numeric. \Z, not $: $ also
 # matches before a final newline.
 _PLAIN_NUMBER = re.compile(r"^[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\Z")
@@ -79,8 +83,10 @@ class UsageError(ValueError):
 # ----------------------------------------------------------------------------
 
 def normalize(value, mask):
-    """Fold a cell to the form two runs agree on; mask=True also hides every number."""
-    text = unicodedata.normalize("NFKC", value).casefold()
+    """Fold a cell to the form two runs agree on; mask=True also hides every number.
+    Apostrophes in front of a formula character are dropped, because a raw export and a copy this
+    tool wrote cannot be told apart by the cell alone (see the README Limits)."""
+    text = unicodedata.normalize("NFKC", _GUARD_FOLD.sub("", value)).casefold()
     if mask:
         text = _COUNT.sub("#", text)
     return " ".join(text.split())
@@ -174,7 +180,7 @@ def decide(prior, current, key_fields, mask_fields, status_field, notes_field, d
     Returns a dict: outcomes (one (name, mark-or-None) per current row, in order), counts,
     lost (human lines for each mark that did not carry), lost_marks, resolved (prior marks
     whose finding is gone), prior_marked, keyable (current rows with a usable key), matched
-    (fingerprints present on both sides), shifted (carried marks whose masked number changed).
+    (fingerprints present on both sides), marked_matched (those that hold a prior mark), shifted (carried marks whose masked number changed).
     """
     pgroups = {}
     prior_marked = 0
@@ -202,6 +208,7 @@ def decide(prior, current, key_fields, mask_fields, status_field, notes_field, d
             cgroups.setdefault(key, []).append(number)
 
     matched = 0
+    marked_matched = 0
     shifted = 0
     for key, numbers in cgroups.items():
         group = pgroups.get(key)
@@ -212,6 +219,7 @@ def decide(prior, current, key_fields, mask_fields, status_field, notes_field, d
         matched += 1
         marks = set(item[1] for item in group)
         marked = [item for item in group if item[1] is not None]
+        marked_matched += 1 if marked else 0
         if len(marks) > 1:
             verdict = "conflict"
             lost.append("current row(s) %s: prior row(s) %s carry different marks for %s"
@@ -275,7 +283,7 @@ def decide(prior, current, key_fields, mask_fields, status_field, notes_field, d
         counts[name] += 1
     return {"outcomes": outcomes, "counts": counts, "lost": lost, "lost_marks": lost_marks,
             "resolved": resolved, "prior_marked": prior_marked, "keyable": keyable,
-            "matched": matched, "shifted": shifted}
+            "matched": matched, "marked_matched": marked_matched, "shifted": shifted}
 
 
 def _numbers(values):
@@ -296,7 +304,19 @@ def dead_run(result, n_current, allow_empty_current):
     if result["matched"] == 0:
         return ("no current finding matches any prior finding on this key, so nothing was "
                 "compared. The key fields or the --mask list probably drifted.")
+    if result["marked_matched"] == 0 and result["counts"]["new"] and not result["lost_marks"]:
+        return ("no prior mark matches a current finding, no mark was reported lost, and %d "
+                "finding(s) are new, so a fix cannot be told from a renamed check or a drifted "
+                "key. Compare the two files by hand." % result["counts"]["new"])
     return None
+
+
+def exit_code(result, accept_shifted):
+    """EXIT_LOST when a mark was lost, or when a carried mark crossed a masked number that the
+    caller has not accepted. A mask cannot tell a moved count from a different finding."""
+    if result["lost_marks"] or (result["shifted"] and not accept_shifted):
+        return EXIT_LOST
+    return EXIT_OK
 
 
 def apply_marks(current, outcomes, status_field, notes_field, default_status):
@@ -313,7 +333,8 @@ def apply_marks(current, outcomes, status_field, notes_field, default_status):
     return rows
 
 
-def build_report(result, n_prior, n_current, key_fields, mask_fields, max_lines=MAX_LINES):
+def build_report(result, n_prior, n_current, key_fields, mask_fields, max_lines=MAX_LINES,
+                 accept_shifted=False):
     """Report lines for a decide() result."""
     counts = result["counts"]
     lines = ["triage_carry_forward: prior %d rows (%d marked), current %d rows"
@@ -327,8 +348,9 @@ def build_report(result, n_prior, n_current, key_fields, mask_fields, max_lines=
     lines.append("%-15s %d" % ("lost marks", result["lost_marks"]))
     if result["shifted"]:
         lines.append("  NOTE  %d carried mark(s) sit on a finding whose masked number changed. "
-                     "--mask treats a number as noise, so check that each is the same finding."
-                     % result["shifted"])
+                     "--mask treats a number as noise, so check that each is the same finding.%s"
+                     % (result["shifted"], "" if accept_shifted
+                        else " The run exits 1 until you pass --accept-shifted."))
     if result["resolved"] > counts["carried"] + counts["kept-current"] and counts["new"]:
         lines.append("  WARNING  %d prior mark(s) have no matching finding while %d finding(s) "
                      "are new. A renamed check or a drifted key looks the same as a fix. "
@@ -412,6 +434,8 @@ def build_parser():
                     help="status of an unreviewed row, default %s" % DEFAULT_STATUS)
     ap.add_argument("--allow-oid-key", action="store_true",
                     help="permit an ObjectID-style column in --key")
+    ap.add_argument("--accept-shifted", action="store_true",
+                    help="exit 0 although a mark crossed a changed masked number (checked by hand)")
     ap.add_argument("--allow-empty-current", action="store_true",
                     help="accept a current file with no rows when the prior file has marks")
     ap.add_argument("--out", help="new CSV to create; needs --apply, never overwrites")
@@ -441,7 +465,8 @@ def run(args):
                     header_prior, header_current, args.allow_oid_key)
     result = decide(prior, current, key_fields, mask_fields,
                     args.status_field, args.notes_field, args.default_status)
-    for line in build_report(result, len(prior), len(current), key_fields, mask_fields):
+    for line in build_report(result, len(prior), len(current), key_fields, mask_fields,
+                             accept_shifted=args.accept_shifted):
         print(line)
     reason = dead_run(result, len(current), args.allow_empty_current)
     if reason:
@@ -465,7 +490,7 @@ def run(args):
         print("wrote %d rows to %s" % (len(rows), args.out))
     else:
         print("dry run: nothing written. Add --out FILE --apply to write the marked copy.")
-    return EXIT_LOST if result["lost_marks"] else EXIT_OK
+    return exit_code(result, args.accept_shifted)
 
 
 def main(argv=None):
@@ -564,6 +589,12 @@ def self_test():
 
     # ---- normalize and fingerprint
     check(normalize("  Two   Words ", False) == "two words", "normalize folds case and whitespace")
+    check(normalize("'=x", False) == normalize("''=x", False) == normalize("=x", False) == "=x",
+          "apostrophes in front of a formula character do not change a key cell  <-- pinned defect")
+    check(normalize(u"'\uff1dx", False) == "=x" and normalize("'-5", False) == "-5",
+          "the fold also covers a full-width formula character and a signed number")
+    check(normalize("'abc", False) == "'abc" and normalize("x'=y", False) == "x'=y" and normalize("'", False) == "'",
+          "an apostrophe that is not in front of a formula character is kept")
     check(normalize("12,345 addresses", True) == "# addresses", "mask hides a count with a thousands separator")
     check(normalize("12,345 addresses", False) == "12,345 addresses", "no mask keeps the count")
     check(normalize("1.5 and 2_000", True) == "# and #", "mask hides a decimal and an underscore count")
@@ -679,6 +710,22 @@ def self_test():
     check(r["shifted"] == 0 and not any("NOTE" in l for l in build_report(r, 1, 1, key, mask)), "an unchanged number raises no note")
     r = decide(prior, current, key, mask, "Status", "Notes", "OPEN")
     check(r["shifted"] == 3, "the story run crosses three changed counts")
+    check(exit_code(r, False) == EXIT_LOST and exit_code(r, True) == EXIT_OK,
+          "a shifted carry exits 1, and exits 0 once --accept-shifted is passed  <-- pinned defect")
+    check(exit_code(dict(r, shifted=0), False) == EXIT_OK and exit_code(dict(r, lost_marks=2, shifted=0), True) == EXIT_LOST,
+          "no shifted carry exits 0, and a lost mark exits 1 even with --accept-shifted")
+    check(not any("exits 1 until" in l for l in build_report(r, 6, 6, key, mask, accept_shifted=True)),
+          "the NOTE drops the exit 1 sentence once --accept-shifted is passed")
+    r1 = decide(pc, cc, key, mask, "Status", "Notes", "OPEN")
+    check(r1["marked_matched"] == 1 and dead_run(r1, 1, False) is None,
+          "a single prior mark that matches is not a dead run, so the shifted carry stays an exit 1 decision")
+
+    # ---- the drift check reads the last --key field only
+    order = ["check_id", "message", "feature"]
+    r = decide([_row(1, "A-1", "block 7", "5 gaps", "FIXED", "x")], [_row(1, "A-1", "block 7", "6 gaps")],
+               order, [], "Status", "Notes", "OPEN")
+    check(r["lost_marks"] == 0 and r["resolved"] == 1,
+          "a changed count in a key field that is not last is not seen as drift, so the mark resolves")
 
     # ---- a partial key drift looks like a fix, so the report warns
     pw = [_row(i, "CHK-%d" % i, "f", "m", "FIXED", "x") for i in range(1, 6)]
@@ -770,6 +817,19 @@ def self_test():
     check("nothing was compared" in dead_run(r, 1, False), "marks present and zero matches is refused  <-- pinned defect")
     r = decide(prior, current, key, mask, "Status", "Notes", "OPEN")
     check(dead_run(r, len(current), False) is None, "the story run is not a dead run")
+    ps = [_row(1, "ADDR-01", "f", "m", "FALSE_POSITIVE", "x"), _row(2, "GEOM-01", "f", "m", "FALSE_POSITIVE", "y"),
+          _row(3, "GEOM-02", "f", "m")]
+    cs = [_row(1, "ADDR-1", "f", "m"), _row(2, "GEOM-1", "f", "m"), _row(3, "GEOM-02", "f", "m")]
+    r = decide(ps, cs, key, [], "Status", "Notes", "OPEN")
+    check(r["matched"] == 1 and r["marked_matched"] == 0 and r["resolved"] == 2 and r["lost_marks"] == 0,
+          "an unmarked survivor matches, but no mark does: both marks resolve")
+    check("renamed check" in dead_run(r, 3, False),
+          "marks resolved, findings new and one unmarked survivor is refused like the all-renamed run  <-- pinned defect")
+    r = decide(ps, [_row(3, "GEOM-02", "f", "m")], key, [], "Status", "Notes", "OPEN")
+    check(dead_run(r, 1, False) is None, "marks resolved with no new finding stays a clean run")
+    r = decide(prior, current, key, [], "Status", "Notes", "OPEN")
+    check(r["marked_matched"] == 0 and r["lost_marks"] == 3 and dead_run(r, len(current), False) is None,
+          "a run that reports lost marks keeps exit 1 instead of the refusal")
 
     # ---- apply_marks
     cur_no_status = [{"check_id": "C", "feature": "f", "message": "m"}]
@@ -835,6 +895,11 @@ def self_test():
         check(header == ["a", "b"], "a UTF-8 BOM is not part of the first column name")
         check(rows == [{"a": "1", "b": "2"}, {"a": "3", "b": ""}], "a short row reads its missing cells as blank")
         raises(lambda: read_rows(put("long.csv", "a,b\n1,2,3\n")), "a row with extra cells is refused")
+        raises(lambda: read_rows(put("trail.csv", "a,b\n1,2,\n")), "a data row with a trailing comma is refused")
+        raises(lambda: read_rows(put("blankhdr.csv", "a,,\n1,2,3\n")), "two blank header cells are refused as a repeated column name")
+        put("ascii1252.csv", b"a,b\nx,y\n", mode="wb", encoding=None)
+        check(read_rows(path("ascii1252.csv"))[1] == [{"a": "x", "b": "y"}],
+              "an ASCII-only file is read whatever code page wrote it")
         raises(lambda: read_rows(put("dup.csv", "a,a\n1,2\n")), "a repeated column name is refused")
         raises(lambda: read_rows(put("empty.csv", "")), "an empty file is refused")
         raises(lambda: read_rows(path("missing.csv")), "a missing file is refused")
@@ -853,11 +918,15 @@ def self_test():
 
         pri = put("prior.csv", _csv_text(prior))
         cur = put("current.csv", _csv_text(current))
-        base = ["--prior", pri, "--current", cur, "--key", "check_id,feature,message", "--mask", "message"]
+        base = ["--prior", pri, "--current", cur, "--key", "check_id,feature,message", "--mask", "message",
+                "--accept-shifted"]
 
         before = sorted(os.listdir(tmp))
+        code, out, err = cli(base[:-1])
+        check(code == 1 and "carried         3" in out and "exits 1 until you pass --accept-shifted" in out,
+              "a mark carried across a changed masked number exits 1 until --accept-shifted is passed  <-- pinned defect")
         code, out, err = cli(base)
-        check(code == 0, "a clean dry run exits 0")
+        check(code == 0 and "exits 1 until" not in out, "a clean dry run exits 0")
         check(sorted(os.listdir(tmp)) == before, "a dry run writes no file at all")
         check("dry run: nothing written" in out, "the dry run says nothing was written")
         check("carried         3" in out and "resolved" in out, "the dry run prints the counts")
@@ -893,7 +962,7 @@ def self_test():
         slim = put("slim.csv", "check_id,feature,message\nADDR-02,block 7,9 duplicate numbers\n")
         slim_out = path("slim_out.csv")
         code, out, err = cli(["--prior", pri, "--current", slim, "--key", "check_id,feature,message",
-                              "--mask", "message", "--out", slim_out, "--apply"])
+                              "--mask", "message", "--accept-shifted", "--out", slim_out, "--apply"])
         header, written = read_rows(slim_out)
         check(code == 0 and header == ["check_id", "feature", "message", "Status", "Notes"], "a current file without Status and Notes gains both")
         check(written[0]["Status"] == "FALSE_POSITIVE" and written[0]["Notes"] == "known, vendor data", "the added columns hold the carried mark")
@@ -938,12 +1007,28 @@ def self_test():
         bc2 = put("blk_c2.csv", "check_id,feature,message,Status,Notes\nADDR-01,block 9,5 addresses disagree,,\nZ,y,x,,\n")
         bp2 = put("blk_p2.csv", "check_id,feature,message,Status,Notes\nADDR-01,block 7,5 addresses disagree,FIXED,done\nZ,y,x,,\n")
         code, out, err = cli(["--prior", bp2, "--current", bc2, "--key", "check_id,feature,message", "--mask", "message"])
-        check(code == 0 and "lost marks      0" in out, "a fixed finding next to a new one on another block exits 0  <-- pinned defect")
+        check(code == 4 and "lost marks      0" in out and "cannot be told from a renamed check" in out,
+              "a fixed finding next to a new one on another block matches no mark, so it exits 4, not 0  <-- pinned defect")
 
         partial_p = put("part_p.csv", _csv_text(pw))
         partial_c = put("part_c.csv", _csv_text(cw))
         code, out, err = cli(["--prior", partial_p, "--current", partial_c, "--key", "check_id,feature,message"])
         check(code == 0 and "WARNING" in out, "a partial rename exits 0 with a WARNING line")
+
+        # a rename with one unmarked survivor must not look cleaner than a rename with none
+        sv_p = put("sv_p.csv", "check_id,feature,message,Status,Notes\nADDR-01,f,m,FALSE_POSITIVE,x\nGEOM-01,f,m,FALSE_POSITIVE,y\nGEOM-02,f,m,OPEN,\n")
+        sv_c = put("sv_c.csv", "check_id,feature,message,Status,Notes\nADDR-1,f,m,,\nGEOM-1,f,m,,\nGEOM-02,f,m,,\n")
+        sv_out = path("sv_out.csv")
+        code, out, err = cli(["--prior", sv_p, "--current", sv_c, "--key", "check_id,feature,message", "--out", sv_out, "--apply"])
+        check(code == 4 and "NOTHING COMPARED" in out and not os.path.exists(sv_out),
+              "two renamed checks and an unmarked survivor exit 4 and write nothing  <-- pinned defect")
+
+        # the prior file was written by this tool, the current file is a raw export
+        gp_p = put("gp_p.csv", "check_id,feature,message,Status,Notes\nC,''=x,m,FALSE_POSITIVE,known\nD,f,ok,OPEN,\n")
+        gp_c = put("gp_c.csv", "check_id,feature,message,Status,Notes\nC,'=x,m,,\nD,f,ok,,\n")
+        code, out, err = cli(["--prior", gp_p, "--current", gp_c, "--key", "check_id,feature,message"])
+        check(code == 0 and "carried         1" in out and "new             0" in out and "WARNING" not in out,
+              "a guarded prior key and a raw current key with the same text carry the mark  <-- pinned defect")
 
         # blank lines are not rows
         blank_p = put("blank_p.csv", "check_id,feature,message,Status,Notes\nC,f,m,FIXED,x\n\n")
@@ -995,7 +1080,8 @@ def self_test():
         alt_c = put("alt_c.csv", "k,State,Memo\nbeta,,\nalpha 9,,\n")
         alt_out = path("alt_out.csv")
         code, out, err = cli(["--prior", alt_p, "--current", alt_c, "--key", "k", "--mask", "k", "--status-field", "State",
-                              "--notes-field", "Memo", "--default-status", "todo", "--out", alt_out, "--apply"])
+                              "--notes-field", "Memo", "--default-status", "todo", "--accept-shifted", "--out", alt_out,
+                              "--apply"])
         written = read_rows(alt_out)[1]
         check(code == 0 and [w["State"] for w in written] == ["todo", "DONE"], "custom field names and default status are honoured")
         check(written[1]["Memo"] == "seen", "the custom notes column is carried")
@@ -1036,6 +1122,8 @@ def self_test():
             check(guard_cell(text) == "'" + text, "guard_cell treats %r as text, not as a number  <-- pinned defect" % text)
         for text in ("-1,234", "+1,000"):
             check(guard_cell(text) == "'" + text, "guard_cell writes %r as text: a thousands separator is not a plain number" % text)
+        for text in ("|x", "%x", chr(1) + "=x"):
+            check(guard_cell(text) == text, "guard_cell does not guard %r: it is not in the OWASP list" % text)
         for text in (chr(160) + "=x", "  +x", chr(0x200b) + "=x"):
             check(guard_cell(text) == text, "guard_cell does not guard %r: only the first character is tested" % text)
         check(unguard_cell("'abc") == "'abc" and unguard_cell("'") == "'" and unguard_cell("") == "",
