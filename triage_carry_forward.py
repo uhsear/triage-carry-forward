@@ -174,11 +174,15 @@ def validate_fields(key_fields, mask_fields, status_field, notes_field,
 # match, not a proof: a secret with no such label still prints (README Limits).
 _SECRET_PAIR = re.compile(
     r"(?i)((?:pass(?:word|wd)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key"
-    r"|credentials?|authorization|bearer|sig(?:nature)?)\s*[=:]\s*)[^\s;,&|\"']+")
+    r"|credentials?|authorization|bearer|sig(?:nature)?)[\"']?\s*[=:]\s*"
+    r"(?:(?:bearer|basic|digest|token)\s+)?)"
+    r"(?:\"[^\"]*\"|'[^']*'|[\"']?[^\s;,&|\"']+)")
+_BEARER_TOKEN = re.compile(r"(?i)\b(bearer\s+)[^\s;,&|\"']+")
 _URL_USER = re.compile(r"(://[^/\s:@]+:)[^/\s@]+@")
 
 
 def _redact(text):
+    text = _BEARER_TOKEN.sub(r"\1<redacted>", text)
     return _URL_USER.sub(r"\1<redacted>@", _SECRET_PAIR.sub(r"\1<redacted>", text))
 
 
@@ -505,7 +509,9 @@ def run(args):
                     header_prior, header_current, args.allow_oid_key)
     result = decide(prior, current, key_fields, mask_fields,
                     args.status_field, args.notes_field, args.default_status)
-    accept_resolved = args.accept_resolved or args.allow_empty_current or args.allow_no_carry
+    # --allow-no-carry accepts a gone mark only when the run carries none (the dead_run case).
+    accept_resolved = (args.accept_resolved or args.allow_empty_current
+                       or (args.allow_no_carry and result["marked_matched"] == 0))
     for line in build_report(result, len(prior), len(current), key_fields, mask_fields,
                              accept_shifted=args.accept_shifted, accept_resolved=accept_resolved):
         print(line)
@@ -912,6 +918,13 @@ def self_test():
           "the key is redacted before it is cut to 60 characters, and a plain word is left alone  <-- pinned defect")
     check("zq9x" not in _mark_text(("FIXED", "api_key=Zq9x7Lp2 rotated")) and _mark_text(("FIXED", "known")) == "FIXED (known)",
           "a credential-looking Notes cell is redacted in the kept-current line  <-- pinned defect")
+    check("zq9x" not in _redact("Bearer Zq9x7Lp2").lower() and "zq9x" not in _redact("Authorization: Bearer Zq9x7Lp2").lower()
+          and _redact("Authorization: Bearer Zq9x7Lp2") == "Authorization: Bearer <redacted>",
+          "a bearer token after a space is redacted, bare or after Authorization:  <-- pinned defect")
+    check("zq9x" not in _redact('password="Zq9x7Lp2"').lower() and "zq9x" not in _redact('{"password": "Zq9x7Lp2"}').lower()
+          and "zq9x" not in _redact("token='Zq9x7Lp2'").lower() and "zq9x" not in _redact('password="Zq9x7Lp2').lower()
+          and "zq9x" not in _redact("Authorization: Basic Zq9x7Lp2==").lower(),
+          "a quoted, JSON, unterminated or Basic-scheme credential value is redacted  <-- pinned defect")
     check(len(_short(("x" * 100,))) == 60, "long keys are shortened for the report")
     check(_short(("x" * 60,)) == "x" * 60, "a key of exactly 60 characters is not shortened")
     many["lost"] = ["l%d" % i for i in range(20)]
@@ -1154,6 +1167,21 @@ def self_test():
               "a current file that lost every marked finding exits 4 and writes nothing  <-- pinned defect")
         code, out, err = cli(tr_argv + ["--allow-no-carry"])
         check(code == 0 and os.path.exists(tr_out), "--allow-no-carry accepts the same run, exits 0 and writes the output")
+
+        nc_p = put("nc_p.csv", "check_id,feature,message,Status,Notes\nA,f,one,FALSE_POSITIVE,known\nB,f,two,FIXED,done\n")
+        nc_c = put("nc_c.csv", "check_id,feature,message,Status,Notes\nA,f,one,,\n")
+        nc_argv = ["--prior", nc_p, "--current", nc_c, "--key", "check_id,feature,message"]
+        code, out, err = cli(nc_argv + ["--allow-no-carry"])
+        check(code == 1 and "carried         1" in out and "resolved        1" in out and "--accept-resolved" in out,
+              "--allow-no-carry does not accept a gone mark in a run that carries one, exit 1  <-- pinned defect")
+        code, out, err = cli(nc_argv + ["--allow-no-carry", "--accept-resolved"])
+        check(code == 0, "--allow-no-carry with --accept-resolved accepts that run")
+        bt_p = put("bt_p.csv", "check_id,feature,message,Status,Notes\nS1,gw,Authorization: Bearer Zq9x7Lp2 rotated,FALSE_POSITIVE,a\n"
+                   "S1,gw,Authorization: Bearer Zq9x7Lp2 rotated,FIXED,b\n")
+        bt_c = put("bt_c.csv", "check_id,feature,message,Status,Notes\nS1,gw,Authorization: Bearer Zq9x7Lp2 rotated,,\n")
+        code, out, err = cli(["--prior", bt_p, "--current", bt_c, "--key", "check_id,feature,message"])
+        check(code == 1 and "LOST" in out and "zq9x7lp2" not in out.lower(),
+              "a bearer token in a conflicting key cell never reaches the printed report  <-- pinned defect")
 
         sq_p = put("sq_p.csv", 'check_id,feature,message,Status,Notes\nA,f,m,FIXED,"oops\nB,f,m,OPEN,\nC,f,m,OPEN,\n')
         sq_c = put("sq_c.csv", "check_id,feature,message,Status,Notes\nA,f,m,,\nB,f,m,,\nC,f,m,,\n")
