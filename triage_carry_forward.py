@@ -20,13 +20,16 @@ compares nothing at all exits 4. So does a prior file with no mark in the status
 columns, a run in which no marked prior finding matches while no mark was reported lost, and a
 run in which every marked prior finding is gone (--allow-no-carry accepts the last two).
 A mark carried across a changed number in a --mask field exits 1 until --accept-shifted is passed.
+A marked prior finding that is gone exits 1 until --accept-resolved is passed, because a fix looks the
+same as a truncated export, a renamed check or a count that moved in a key field.
 
     python triage_carry_forward.py --self-test
     python triage_carry_forward.py --prior old.csv --current new.csv --key check_id,feature,message --mask message
     python triage_carry_forward.py --prior old.csv --current new.csv --key check_id,feature,message --mask message --out new_marked.csv --apply
 
-Without --apply nothing is written. Exit codes: 0 every mark carried or resolved, 1 some
-marks could not be carried or a carried mark crossed a changed masked number, 2 usage error,
+Without --apply nothing is written. Exit codes: 0 every mark carried, or resolved and
+accepted, 1 some marks could not be carried, a carried mark crossed a changed masked number, or a
+marked finding is gone and --accept-resolved was not passed, 2 usage error,
 3 the output could not be written, 4 the key compared nothing, 5 an unexpected internal error.
 """
 from __future__ import print_function
@@ -64,7 +67,6 @@ _OID_NAME = re.compile(
 # Injection): = + - @ tab CR LF, and the full-width forms of the first four.
 _LEAD = r"=+\-@\t\r\n\uff1d\uff0b\uff0d\uff20"
 _GUARDED = re.compile(u"^'*[" + _LEAD + u"]")
-_ESCAPED = re.compile(u"^'+[" + _LEAD + u"]")
 # Apostrophes in front of a formula character, dropped from a key cell before it is compared.
 _GUARD_FOLD = re.compile(u"^'+(?=[" + _LEAD + u"])")
 # A plain number is never a formula, so a numeric column stays numeric. \Z, not $: $ also
@@ -109,8 +111,10 @@ def guard_cell(value):
 
 
 def unguard_cell(value):
-    """Inverse of guard_cell: strip one apostrophe that sits in front of a formula character."""
-    return value[1:] if _ESCAPED.match(value) else value
+    """Exact inverse of guard_cell: strip the leading apostrophe only when guard_cell would have
+    added it. A raw cell such as "'-3" (apostrophe, plain number) is no guard, so it stays."""
+    rest = value[1:]
+    return rest if value[:1] == "'" and _GUARDED.match(rest) and not _PLAIN_NUMBER.match(rest) else value
 
 
 def is_oid_name(name):
@@ -320,10 +324,13 @@ def dead_run(result, n_current, allow_empty_current, allow_no_carry=False):
     return None
 
 
-def exit_code(result, accept_shifted):
-    """EXIT_LOST when a mark was lost, or when a carried mark crossed a masked number that the
-    caller has not accepted. A mask cannot tell a moved count from a different finding."""
-    if result["lost_marks"] or (result["shifted"] and not accept_shifted):
+def exit_code(result, accept_shifted, accept_resolved=False):
+    """EXIT_LOST when a mark was lost, when a carried mark crossed a masked number that the
+    caller has not accepted, or when a mark is called resolved and the caller has not accepted
+    it. A mask cannot tell a moved count from a different finding, and a fixed finding looks
+    the same as a truncated export, a renamed check or a drifted key."""
+    if (result["lost_marks"] or (result["shifted"] and not accept_shifted)
+            or (result["resolved"] and not accept_resolved)):
         return EXIT_LOST
     return EXIT_OK
 
@@ -343,7 +350,7 @@ def apply_marks(current, outcomes, status_field, notes_field, default_status):
 
 
 def build_report(result, n_prior, n_current, key_fields, mask_fields, max_lines=MAX_LINES,
-                 accept_shifted=False):
+                 accept_shifted=False, accept_resolved=False):
     """Report lines for a decide() result."""
     counts = result["counts"]
     lines = ["triage_carry_forward: prior %d rows (%d marked), current %d rows"
@@ -360,6 +367,11 @@ def build_report(result, n_prior, n_current, key_fields, mask_fields, max_lines=
                      "--mask treats a number as noise, so check that each is the same finding.%s"
                      % (result["shifted"], "" if accept_shifted
                         else " The run exits 1 until you pass --accept-shifted."))
+    if result["resolved"] and not accept_resolved:
+        lines.append("  NOTE  %d prior mark(s) have no matching finding. A fix looks the same as "
+                     "a truncated export, a renamed check or a drifted key. Check that each "
+                     "finding is really gone. The run exits 1 until you pass --accept-resolved."
+                     % result["resolved"])
     if result["resolved"] > counts["carried"] + counts["kept-current"] and counts["new"]:
         lines.append("  WARNING  %d prior mark(s) have no matching finding while %d finding(s) "
                      "are new. A renamed check or a drifted key looks the same as a fix. "
@@ -445,6 +457,9 @@ def build_parser():
                     help="permit an ObjectID-style column in --key")
     ap.add_argument("--accept-shifted", action="store_true",
                     help="exit 0 although a mark crossed a changed masked number (checked by hand)")
+    ap.add_argument("--accept-resolved", action="store_true",
+                    help="exit 0 although marked findings are gone (checked by hand). "
+                         "--allow-empty-current and --allow-no-carry imply it")
     ap.add_argument("--allow-empty-current", action="store_true",
                     help="accept a current file with no rows when the prior file has marks")
     ap.add_argument("--allow-no-carry", action="store_true",
@@ -477,8 +492,9 @@ def run(args):
                     header_prior, header_current, args.allow_oid_key)
     result = decide(prior, current, key_fields, mask_fields,
                     args.status_field, args.notes_field, args.default_status)
+    accept_resolved = args.accept_resolved or args.allow_empty_current or args.allow_no_carry
     for line in build_report(result, len(prior), len(current), key_fields, mask_fields,
-                             accept_shifted=args.accept_shifted):
+                             accept_shifted=args.accept_shifted, accept_resolved=accept_resolved):
         print(line)
     reason = dead_run(result, len(current), args.allow_empty_current, args.allow_no_carry)
     if reason:
@@ -502,7 +518,7 @@ def run(args):
         print("wrote %d rows to %s" % (len(rows), args.out))
     else:
         print("dry run: nothing written. Add --out FILE --apply to write the marked copy.")
-    return exit_code(result, args.accept_shifted)
+    return exit_code(result, args.accept_shifted, accept_resolved)
 
 
 def main(argv=None):
@@ -722,11 +738,12 @@ def self_test():
     check(r["shifted"] == 0 and not any("NOTE" in l for l in build_report(r, 1, 1, key, mask)), "an unchanged number raises no note")
     r = decide(prior, current, key, mask, "Status", "Notes", "OPEN")
     check(r["shifted"] == 3, "the story run crosses three changed counts")
-    check(exit_code(r, False) == EXIT_LOST and exit_code(r, True) == EXIT_OK,
+    ra = dict(r, resolved=0)
+    check(exit_code(ra, False) == EXIT_LOST and exit_code(ra, True) == EXIT_OK,
           "a shifted carry exits 1, and exits 0 once --accept-shifted is passed  <-- pinned defect")
-    check(exit_code(dict(r, shifted=0), False) == EXIT_OK and exit_code(dict(r, lost_marks=2, shifted=0), True) == EXIT_LOST,
+    check(exit_code(dict(ra, shifted=0), False) == EXIT_OK and exit_code(dict(ra, lost_marks=2, shifted=0), True) == EXIT_LOST,
           "no shifted carry exits 0, and a lost mark exits 1 even with --accept-shifted")
-    check(not any("exits 1 until" in l for l in build_report(r, 6, 6, key, mask, accept_shifted=True)),
+    check(not any("exits 1 until" in l for l in build_report(ra, 6, 6, key, mask, accept_shifted=True)),
           "the NOTE drops the exit 1 sentence once --accept-shifted is passed")
     r1 = decide(pc, cc, key, mask, "Status", "Notes", "OPEN")
     check(r1["marked_matched"] == 1 and dead_run(r1, 1, False) is None,
@@ -937,12 +954,15 @@ def self_test():
         pri = put("prior.csv", _csv_text(prior))
         cur = put("current.csv", _csv_text(current))
         base = ["--prior", pri, "--current", cur, "--key", "check_id,feature,message", "--mask", "message",
-                "--accept-shifted"]
+                "--accept-resolved", "--accept-shifted"]
 
         before = sorted(os.listdir(tmp))
         code, out, err = cli(base[:-1])
         check(code == 1 and "carried         3" in out and "exits 1 until you pass --accept-shifted" in out,
               "a mark carried across a changed masked number exits 1 until --accept-shifted is passed  <-- pinned defect")
+        code, out, err = cli(base[:-2] + ["--accept-shifted"])
+        check(code == 1 and "resolved        1" in out and "exits 1 until you pass --accept-resolved" in out,
+              "a marked finding that is gone exits 1 until --accept-resolved is passed  <-- pinned defect")
         code, out, err = cli(base)
         check(code == 0 and "exits 1 until" not in out, "a clean dry run exits 0")
         check(sorted(os.listdir(tmp)) == before, "a dry run writes no file at all")
@@ -980,7 +1000,8 @@ def self_test():
         slim = put("slim.csv", "check_id,feature,message\nADDR-02,block 7,9 duplicate numbers\n")
         slim_out = path("slim_out.csv")
         code, out, err = cli(["--prior", pri, "--current", slim, "--key", "check_id,feature,message",
-                              "--mask", "message", "--accept-shifted", "--out", slim_out, "--apply"])
+                              "--mask", "message", "--accept-resolved", "--accept-shifted", "--out", slim_out,
+                              "--apply"])
         header, written = read_rows(slim_out)
         check(code == 0 and header == ["check_id", "feature", "message", "Status", "Notes"], "a current file without Status and Notes gains both")
         check(written[0]["Status"] == "FALSE_POSITIVE" and written[0]["Notes"] == "known, vendor data", "the added columns hold the carried mark")
@@ -1030,8 +1051,36 @@ def self_test():
 
         partial_p = put("part_p.csv", _csv_text(pw))
         partial_c = put("part_c.csv", _csv_text(cw))
-        code, out, err = cli(["--prior", partial_p, "--current", partial_c, "--key", "check_id,feature,message"])
-        check(code == 0 and "WARNING" in out, "a partial rename exits 0 with a WARNING line")
+        partial_args = ["--prior", partial_p, "--current", partial_c, "--key", "check_id,feature,message"]
+        code, out, err = cli(partial_args)
+        check(code == 1 and "WARNING" in out and "--accept-resolved" in out,
+              "a partial rename exits 1 with a WARNING line until --accept-resolved is passed  <-- pinned defect")
+        code, out, err = cli(partial_args + ["--accept-resolved"])
+        check(code == 0 and "WARNING" in out, "a partial rename accepted by hand exits 0 and still prints the WARNING")
+
+        # a marked finding that is gone cannot be told from a truncated export or a missed key drift
+        trunc_p = put("trunc_p.csv", "check_id,feature,message,Status,Notes\nA,f,one,FALSE_POSITIVE,known\n"
+                      "B,f,two,FALSE_POSITIVE,known\nC,f,three,FALSE_POSITIVE,known\n")
+        trunc_c = put("trunc_c.csv", "check_id,feature,message,Status,Notes\nA,f,one,,\n")
+        trunc_args = ["--prior", trunc_p, "--current", trunc_c, "--key", "check_id,feature,message"]
+        code, out, err = cli(trunc_args)
+        check(code == 1 and "resolved        2" in out and "--accept-resolved" in out,
+              "a current file that keeps one of three marked findings exits 1, not 0  <-- pinned defect")
+        code, out, err = cli(trunc_args + ["--accept-resolved"])
+        check(code == 0 and "resolved        2" in out, "the same run exits 0 once --accept-resolved is passed")
+        drift_p = put("drift_p.csv", "check_id,feature,message,Status,Notes\nA,f,12 addresses,FIXED,x\n"
+                      "B,f,one,FALSE_POSITIVE,k\nC,f,two,FALSE_POSITIVE,k\n")
+        drift_c = put("drift_c.csv", "check_id,feature,message,Status,Notes\nA,f,13 addresses,,\nB,f,one,,\nC,f,two,,\n")
+        code, out, err = cli(["--prior", drift_p, "--current", drift_c, "--key", "check_id,message,feature"])
+        check(code == 1 and "carried         2" in out and "resolved        1" in out,
+              "a count that moves in a key field that is not last exits 1 instead of reporting the mark resolved  <-- pinned defect")
+        apos_p = put("apos_p.csv", "check_id,feature,message,Status,Notes\nA,f,m,FIXED,'-3\n")
+        apos_c = put("apos_c.csv", "check_id,feature,message,Status,Notes\nA,f,m,,\n")
+        apos_out = path("apos_out.csv")
+        code, out, err = cli(["--prior", apos_p, "--current", apos_c, "--key", "check_id,feature,message",
+                              "--out", apos_out, "--apply"])
+        check(code == 0 and read_rows(apos_out)[1][0]["Notes"] == "'-3",
+              "a Notes cell that really starts with an apostrophe and a number survives the carry  <-- pinned defect")
 
         # a rename with one unmarked survivor must not look cleaner than a rename with none
         sv_p = put("sv_p.csv", "check_id,feature,message,Status,Notes\nADDR-01,f,m,FALSE_POSITIVE,x\nGEOM-01,f,m,FALSE_POSITIVE,y\nGEOM-02,f,m,OPEN,\n")
@@ -1190,7 +1239,9 @@ def self_test():
         check(unguard_cell("'abc") == "'abc" and unguard_cell("'") == "'" and unguard_cell("") == "",
               "unguard_cell leaves an apostrophe that is not in front of a formula character")
         check(unguard_cell("''=x") == "'=x" and unguard_cell("'=x") == "=x", "unguard_cell strips exactly one apostrophe")
-        check(unguard_cell("'-5") == "-5", "unguard_cell strips the apostrophe in front of a negative number a foreign tool guarded")
+        check(unguard_cell("'-5") == "'-5" and unguard_cell("'+4.5") == "'+4.5",
+              "unguard_cell keeps an apostrophe in front of a plain number, because guard_cell never adds one  <-- pinned defect")
+        check(unguard_cell("'-1,234") == "-1,234", "unguard_cell strips the apostrophe guard_cell adds to a comma-separated number")
         sample = ["=1+1", "'=x", "''=x", "'hello", "'", "''", "'\t", "-5", "'-5", "@a", "\tz", "\rz", "+", "", "plain", u"\uff1dx",
                   "-3\n", "'-3\n"]
         check(all(unguard_cell(guard_cell(t)) == t for t in sample),
@@ -1225,6 +1276,17 @@ def self_test():
             write_rows(path(out_name), HEADER, [row])
             check(raw_cells(out_name)[1][col] == "'plain apostrophe" and read_rows(path(out_name))[1][0][field] == "'plain apostrophe",
                   "a %s cell with a leading apostrophe and no formula character is neither changed nor stripped" % field)
+            row[field] = "'-3"
+            os.remove(path(out_name))
+            write_rows(path(out_name), HEADER, [row])
+            check(raw_cells(out_name)[1][col] == "''-3" and read_rows(path(out_name))[1][0][field] == "'-3",
+                  "a %s cell that is an apostrophe and a plain number survives the round trip  <-- pinned defect" % field)
+        raw_apos = read_rows(put("rawapos.csv", "k,Memo\na,'=x\nb,'-12\n"))[1]
+        check(raw_apos == [{"k": "a", "Memo": "=x"}, {"k": "b", "Memo": "'-12"}],
+              "a raw '=x is read as the guarded =x, and a raw '-12 keeps its apostrophe because no guard was written there  <-- pinned defect")
+        write_rows(path("rawapos_out.csv"), ["k", "Memo"], raw_apos)
+        check(raw_cells("rawapos_out.csv")[1:] == [["a", "'=x"], ["b", "''-12"]],
+              "a raw '=x is written back as '=x, and a raw '-12 is written as ''-12  <-- pinned defect")
         write_rows(path("num.csv"), HEADER, [_row(-3, "-7", "f", "-12", "+4", "-0.5")])
         check(raw_cells("num.csv")[1] == ["-3", "-7", "f", "-12", "+4", "-0.5"],
               "numeric cells, negative or signed, are written as numbers  <-- pinned defect")

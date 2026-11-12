@@ -39,9 +39,9 @@ across runs, so an alert appears once (see References). That is a good design, a
 
 [SarifHub](https://github.com/sapir0507/sarifhub) is a public project that, by its own
 description, tracks findings across SARIF scans with a stable fingerprint and supports triage
-with an audit trail. When I read its README on 2026-11-11 (last push 2026-09-25), its own status
+with an audit trail. When I read its README on 2026-11-11 its own status
 table listed fingerprinting (phase 5) and triage (phase 6) as Planned, not as shipped features.
-The project can change after that date. I did not run it.
+The page shows no date of the last push, so I give the date I read it. The project can change after that date. I did not run it.
 
 Those tools take SARIF. A geodatabase validation tool writes a table, not SARIF, and a flat
 findings table has no source file and line to compute a fingerprint from. This tool takes two
@@ -93,6 +93,7 @@ count-changed   0
 unkeyable       0
 resolved        1  (prior marks whose finding is gone)
 lost marks      3
+  NOTE  1 prior mark(s) have no matching finding. A fix looks the same as a truncated export, a renamed check or a drifted key. Check that each finding is really gone. The run exits 1 until you pass --accept-resolved.
   WARNING  1 prior mark(s) have no matching finding while 5 finding(s) are new. A renamed check or a drifted key looks the same as a fix. Compare them before you trust the file.
   LOST  prior row(s) 2: addr-02 | block 7 | 3 duplicate numbers looks like current row(s) 3 but a number differs in message. Add that field to --mask if the number is a count.
   LOST  prior row(s) 3: geom-01 | tract 4 | 8 gaps over 5 m looks like current row(s) 5 but a number differs in message. Add that field to --mask if the number is a count.
@@ -123,16 +124,40 @@ unkeyable       0
 resolved        1  (prior marks whose finding is gone)
 lost marks      0
   NOTE  3 carried mark(s) sit on a finding whose masked number changed. --mask treats a number as noise, so check that each is the same finding. The run exits 1 until you pass --accept-shifted.
+  NOTE  1 prior mark(s) have no matching finding. A fix looks the same as a truncated export, a renamed check or a drifted key. Check that each finding is really gone. The run exits 1 until you pass --accept-resolved.
 dry run: nothing written. Add --out FILE --apply to write the marked copy.
 exit 1
 ```
 
-The three counts are real count changes, so check them and run the same command again with
-`--accept-shifted`. The report is the same without the last sentence of the NOTE, and the exit
-code is 0. Add `--out marked.csv --apply` to write the current table with three marks on the
-right findings, under the new ObjectIDs. The self-test pins that written file; the transcript
-above stops at the dry run. The fourth prior mark belonged to a finding that is really gone,
-so it is reported as resolved.
+The three counts are real count changes, so check them. One more prior mark, on `ADDR-03`
+in block 2, has no matching finding. The tool calls it resolved, and the run exits 1 until you
+pass `--accept-resolved`, because a fixed finding looks the same as a truncated export, a
+renamed check or a count that moved in a key column. Check that the finding is really gone,
+then run the command again with both flags:
+
+```
+$ python triage_carry_forward.py --prior prior.csv --current current.csv --key check_id,feature,message --mask message --accept-shifted --accept-resolved
+triage_carry_forward: prior 6 rows (4 marked), current 6 rows
+key: check_id, feature, message (counts masked in: message)
+carried         3
+kept-current    0
+unmarked        2
+new             1
+conflict        0
+count-changed   0
+unkeyable       0
+resolved        1  (prior marks whose finding is gone)
+lost marks      0
+  NOTE  3 carried mark(s) sit on a finding whose masked number changed. --mask treats a number as noise, so check that each is the same finding.
+dry run: nothing written. Add --out FILE --apply to write the marked copy.
+exit 0
+```
+
+Add `--out marked.csv --apply` to write the current table with three marks carried, under the
+new ObjectIDs. The self-test pins that written file; the transcript above stops at the dry
+run. One carried mark is the `FIXED` mark of block 9 (20 addresses), which lands on the
+19-address finding. If that finding is still open, the mark hides it. The NOTE and the exit 1
+exist to make you check this, and `--accept-shifted` records that you did.
 
 The exit 1 is the cost of masking. The tool cannot tell a moved count from a different finding
 of the same shape. A parcel numbered 1200 and a parcel numbered 1300 share one masked key, so a
@@ -154,24 +179,24 @@ PASS  the OBJECTID 4 mark belongs to a different finding after the rebuild  <-- 
 ...
 PASS  the footer of a failing harness names the failures and exits 1
 --------------------------------------------------------------------
-369 assertions, 0 failed
+383 assertions, 0 failed
 ```
 
 The block above elides the middle of the run with `...`. The first lines, the last PASS line
-and the footer are verbatim. Run the command to see all 369 lines.
+and the footer are verbatim. Run the command to see all 383 lines.
 
 Every fixture is synthetic. The self-test also runs the script as a separate process, writes
 real CSV files in a scratch directory, and reads back the files it wrote. Branch coverage of
 the file is 100 percent, measured with `coverage run --branch triage_carry_forward.py --self-test`
-(881 statements, 182 branches, none missed). One exclusion applies: the last line,
+(916 statements, 184 branches, none missed). One exclusion applies: the last line,
 `if __name__ == "__main__":`, carries `# pragma: no branch`, because its false branch is
-unreachable when the file is run. The count is 369 on Windows (Python 3.11, 3.12 and 3.13) and on
-Linux (Python 3.9, 3.10 and 3.12). No assertion depends on the platform.
+unreachable when the file is run. The count is 383 on Windows (Python 3.9, 3.10, 3.12 and 3.13) and on
+Linux (Python 3.9, 3.10, 3.11, 3.12 and 3.13). No assertion depends on the platform.
 
 ## Requirements
 
 Python 3.9 or newer, standard library only. No `arcpy`, no network. Nothing to install. The
-self-test was run, with warnings as errors, on Python 3.11, 3.12 and 3.13 on Windows and on 3.9, 3.10 and 3.12 on Linux.
+self-test was run, with warnings as errors, on Python 3.9, 3.10, 3.12 and 3.13 on Windows and on 3.9, 3.10, 3.11, 3.12 and 3.13 on Linux.
 
 ```
 git clone https://github.com/uhsear/triage-carry-forward.git
@@ -195,6 +220,7 @@ Check first. Nothing is written without `--apply`.
 | `--notes-field` | `Notes` | Column that holds the reviewer notes. |
 | `--default-status` | `OPEN` | Status of a row nobody reviewed. Compared without case. |
 | `--accept-shifted` | off | Exit 0 although a mark crossed a changed masked number. Pass it after you checked them. |
+| `--accept-resolved` | off | Exit 0 although marked findings are gone from the current file. Pass it after you checked that each is really fixed. `--allow-empty-current` and `--allow-no-carry` imply it. |
 | `--allow-oid-key` | off | Allow an ObjectID-style column in `--key`. |
 | `--allow-empty-current` | off | Accept a current file with no rows when the prior file has marks. |
 | `--allow-no-carry` | off | Accept a run that carries no mark: the prior file holds no marks, or every marked prior finding is gone from the current file. |
@@ -205,10 +231,16 @@ Check first. Nothing is written without `--apply`.
 Spell flag names in full. `allow_abbrev` is off, so `--ap` is refused and does not act as
 `--apply`.
 
-Exit codes: 0 every mark carried or resolved, 1 some marks could not be carried or a carried
-mark crossed a changed masked number, 2 usage error, 3 the output could not be written, 4 the
+Exit codes: 0 every mark carried, or resolved and accepted, 1 some marks could not be carried,
+a carried mark crossed a changed masked number, or a marked finding is gone and
+`--accept-resolved` was not passed, 2 usage error, 3 the output could not be written, 4 the
 run could not tell a fix from a failure (see "How it decides"), 5 an unexpected internal error (one line on stderr, no traceback). `--self-test` also exits 1 when an
 assertion fails.
+
+A marked finding that is gone is `resolved`. The tool cannot tell a fix from a truncated
+export, a renamed check or a count that moved in a key column, so the run exits 1 and prints a
+NOTE until you pass `--accept-resolved`. Compare the `resolved` count and the row counts before
+you do.
 
 Exit 0 can still print a `WARNING` line. It appears when resolved prior marks outnumber the
 carried plus kept-current rows and new findings appeared, which is also what a renamed check
@@ -239,7 +271,7 @@ For each fingerprint:
 - The prior mark has a different number of rows now: `count-changed`. The tool cannot tell which twin the mark belonged to, so nothing is carried.
 - Every key cell is blank: `unkeyable`. A marked prior row like this counts as lost.
 
-A prior mark whose fingerprint is gone is `resolved`, unless the same fingerprint appears
+A prior mark whose fingerprint is gone is `resolved` (the run exits 1 until `--accept-resolved`), unless the same fingerprint appears
 after the numbers in the last `--key` column (and in the `--mask` columns) are masked. Then the
 count drifted, and the mark is reported as lost.
 
@@ -308,16 +340,16 @@ carries, and the run exits 1 until you pass `--accept-shifted`.
   nothing, and a Notes cell that really starts with `'` survives: `'=quoted` is written as
   `''=quoted` and read back as `'=quoted`. The self-test pins each guarded field, tab and CR
   included.
-- The strip on read cannot tell a guard from a real apostrophe. It removes one apostrophe from
-  any cell that starts with `'` and then a formula character, in `--prior` and in `--current`,
-  whoever wrote the file. A cell `'=x` in a raw export therefore reads as `=x`, and `'-12`
-  reads as the number `-12`. A prior file written by an older, unguarded version of this tool
-  loses its first apostrophe the same way on the next carry. Key cells are compared with those
-  apostrophes dropped on both sides, so a guarded prior cell and a raw current cell with the
-  same text still carry the mark. The copy written from a raw current file still loses one
-  apostrophe on a cell that really starts with `'` and a formula character. The strip applies to
-  every column, not only the key and the marks: a raw export cell such as `'-12` or `'=x` in any
-  column is read, and written back, without its apostrophe.
+- The strip on read is exact. It removes one leading apostrophe only where the writer would
+  add one: in front of a formula character, when the rest of the cell is not a plain number. A
+  raw cell `'=x` reads as `=x` and is written back as `'=x`, so the file is unchanged. A raw
+  cell `'-12` (apostrophe, then a plain number) is not a guard, so it is read as `'-12` and
+  written as `''-12`. The same holds for a Notes cell: `'-3` carries through as `'-3`. The tool
+  cannot tell a guard from a real apostrophe in a raw export, so a raw `'=x` that really starts
+  with an apostrophe loses it, and a prior file written by an older, unguarded version of this
+  tool loses it the same way on the next carry. Key cells are compared with those apostrophes
+  dropped on both sides, so a guarded prior cell and a raw current cell with the same text
+  still carry the mark. The strip applies to every column, not only the key and the marks.
 - The key fold drops every leading apostrophe in front of a formula character. Two findings
   whose key cells differ only by leading apostrophes before a formula character are treated as
   the same finding, and fall under the `conflict` or `count-changed` rules.
@@ -328,8 +360,9 @@ carries, and the run exits 1 until you pass `--accept-shifted`.
   and `@`, and nothing else. A cell
   that starts with `|` or `%` is not guarded.
 - A signed number with a thousands separator, such as `-1,234` or `+1,000`, is not a plain
-  number to the guard. A signed number without one, such as `-3` or `+4.5`, is left alone. It is written as text with a leading apostrophe, so a column that holds
-  such values does not stay numeric.
+  number to the guard, so the tool writes that number as text with a leading apostrophe, and a
+  column that holds such values does not stay numeric. A signed number without a separator,
+  such as `-3` or `+4.5`, is written unchanged.
 - The apostrophe is visible text when the CSV is opened in some spreadsheets. A guarded cell
   shows a leading `'` there, and the strip on read undoes it only for this tool. OWASP says the
   mitigations it lists, the apostrophe among them, are not reliable in Excel after the file is
@@ -342,7 +375,7 @@ carries, and the run exits 1 until you pass `--accept-shifted`.
 - Column names for `--key`, `--status-field` and `--notes-field` match exactly. A header that
   differs in case or has trailing spaces is refused as a usage error.
 - Input must be comma-delimited UTF-8. A cp1252 file that holds a non-ASCII byte, a UTF-16
-  export and a semicolon-delimited file are refused. An ASCII-only cp1252 file is accepted,
+  export and a semicolon-delimited file are refused with exit 2. An ASCII-only cp1252 file is accepted,
   because its bytes are valid UTF-8. The semicolon case reports a missing key column and hides the real cause,
   so check the delimiter first.
 - The output is UTF-8 without a byte order mark, with LF line ends. Excel may show non-ASCII
@@ -362,16 +395,18 @@ carries, and the run exits 1 until you pass `--accept-shifted`.
 - A `conflict` or `count-changed` verdict counts the prior marks as lost even when the new
   rows already hold a mark of their own.
 - A current file that is a truncated export and still matches at least one marked prior finding
-  reports the missing marked findings as resolved and exits 0, because the tool cannot tell a
-  fix from a missing row. Only a current file that lost every marked finding is refused. Compare
-  the `resolved` count and the row counts yourself.
+  reports the missing marked findings as resolved, because the tool cannot tell a fix from a
+  missing row. The run exits 1 until you pass `--accept-resolved`, and the pass is your word that
+  you compared the row counts. A current file that lost every marked finding exits 4.
 - Giving the same file as `--prior` and `--current` is accepted. A marked row counts as
   kept-current, an unmarked row as unmarked, and the run exits 0. The tool does not check that
   the two files are different runs.
 - The report prints key cells as they appear in the data, control and escape characters
   included. A key cell that holds a control or escape character is printed unchanged in the
-  LOST and conflict lines; redirect the report to a file when the data is not trusted. This is
-  not covered by the self-test.
+  LOST and conflict lines, up to 60 characters of each cell. A key column that holds a secret,
+  such as a connection string in a message, sends that text to the terminal and any log;
+  redirect or scrub the report when key columns may hold secrets. This is not covered by the
+  self-test.
 - `--out` is opened for exclusive creation, but the tool does not test that the target is a
   regular file. On Windows, `--out nul` can report success and keep nothing; NUL is a reserved
   device name there (see References). This is not covered by the self-test.
@@ -400,7 +435,7 @@ carries, and the run exits 1 until you pass `--accept-shifted`.
 - A blank line is skipped, so in a one-column file a row whose only cell is empty is skipped
   too.
 - An unexpected error exits 5 with one line on stderr. Exit 1 from a run means lost marks or
-  an unaccepted shifted carry. Exit 1 from `--self-test` means failed assertions.
+  an unaccepted shifted carry or an unaccepted resolved mark. Exit 1 from `--self-test` means failed assertions.
 - A header with two or more blank cells is refused as exit 2 `repeats a column name`. A header
   with exactly one blank cell, such as a trailing comma, is accepted, and the blank column is
   carried through to the output. A data row with a trailing comma under a header that has no
@@ -408,7 +443,15 @@ carries, and the run exits 1 until you pass `--accept-shifted`.
   exports can trigger either refusal.
 - Only the last `--key` column is tested for a drifted count. With the message listed before
   another column and no `--mask`, a changed count is not recognised as drift, so the mark is
-  reported resolved. List the message last.
+  reported resolved and the run exits 1 until `--accept-resolved`. List the message last.
+- NFKC folding makes compatibility characters, such as ligatures, equal to their plain forms,
+  so two findings that differ only by such a character share a fingerprint and fall under the
+  `conflict` or `count-changed` rules. This was not run.
+- A cell that holds a NUL byte is read on Python 3.13 and refused as exit 2 `cannot read ... line
+  contains NUL` on Python 3.9, so the exit code for such a file depends on the Python version.
+  Both were run on a one-cell file.
+- A partial write leaves a partial `--out` file with exit 3, and the next run refuses it as
+  already existing. Delete the partial file before you run again.
 
 ## How each claim was exercised
 
@@ -440,7 +483,10 @@ carries, and the run exits 1 until you pass `--accept-shifted`.
 | A mark carried across a changed masked number exits 1 until `--accept-shifted` | Self-test, `exit_code` and CLI assertions |
 | A rename with one unmarked survivor exits 4, like a rename with none | Self-test, `dead_run` and CLI assertions |
 | A guarded prior key and a raw current key with the same text carry the mark | Self-test, `normalize` and CLI assertions |
-| Linux and Windows agree | 369 assertions on Python 3.11, 3.12 and 3.13 on Windows and 3.9, 3.10 and 3.12 on Linux |
+| A marked finding that is gone exits 1 until `--accept-resolved`, for a truncated export, a partial rename and a count that moved in a key column | Self-test, `exit_code` and CLI assertions, the three pinned runs |
+| A Notes cell that is an apostrophe and a number, and a raw `'=x` or `'-12`, round-trip as described in Limits | Self-test, the per-field round trip and the raw apostrophe assertions |
+| A cell with a NUL byte is read on 3.13 and refused on 3.9 | Run by hand on one file, not in the self-test |
+| Linux and Windows agree | 383 assertions on Python 3.9, 3.10, 3.12 and 3.13 on Windows and 3.9, 3.10, 3.11, 3.12 and 3.13 on Linux |
 
 ## References
 
