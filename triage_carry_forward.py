@@ -169,13 +169,26 @@ def validate_fields(key_fields, mask_fields, status_field, notes_field,
         raise UsageError("notes field %s is not a column of the prior file" % notes_field)
 
 
+# Report lines echo cells from the input. A cell that looks like "name=value" for a credential
+# name, or a URL with user:password@, prints the name and hides the value. This is a pattern
+# match, not a proof: a secret with no such label still prints (README Limits).
+_SECRET_PAIR = re.compile(
+    r"(?i)((?:pass(?:word|wd)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key"
+    r"|credentials?|authorization|bearer|sig(?:nature)?)\s*[=:]\s*)[^\s;,&|\"']+")
+_URL_USER = re.compile(r"(://[^/\s:@]+:)[^/\s@]+@")
+
+
+def _redact(text):
+    return _URL_USER.sub(r"\1<redacted>@", _SECRET_PAIR.sub(r"\1<redacted>", text))
+
+
 def _mark_text(mark):
     status, notes = mark
-    return "%s (%s)" % (status, notes) if notes else status
+    return _redact("%s (%s)" % (status, notes) if notes else status)
 
 
 def _short(key):
-    text = " | ".join(key)
+    text = _redact(" | ".join(key))
     return text if len(text) <= 60 else text[:57] + "..."
 
 
@@ -891,6 +904,14 @@ def self_test():
             "lost_marks": 25, "resolved": 0, "prior_marked": 25, "keyable": 0, "matched": 0, "shifted": 0}
     lines = build_report(many, 25, 0, key, [])
     check(sum(1 for l in lines if l.startswith("  LOST")) == 20 and lines[-1] == "  ... and 5 more", "report caps the lost list at 20 and counts the rest")
+    check(_short(("svc-01", "layer 4", "token=zq9x7lp2 expired")) == "svc-01 | layer 4 | token=<redacted> expired"
+          and "zq9x7lp2" not in _short(("a", "Password: Zq9x7Lp2")) and "zq9x" not in _short(("t", "Bearer: Zq9x7Lp2"))
+          and "zq9x" not in _short(("db://app:Zq9x7Lp2@host/x",)) and "app:<redacted>@host" in _short(("db://app:Zq9x7Lp2@host/x",)),
+          "a credential-looking key cell is redacted before the report prints it  <-- pinned defect")
+    check("zq9x7lp2" not in _short(("x" * 40, "token=zq9x7lp2" + "y" * 40)) and _short(("tokens: 5 gaps",)) == "tokens: 5 gaps",
+          "the key is redacted before it is cut to 60 characters, and a plain word is left alone  <-- pinned defect")
+    check("zq9x" not in _mark_text(("FIXED", "api_key=Zq9x7Lp2 rotated")) and _mark_text(("FIXED", "known")) == "FIXED (known)",
+          "a credential-looking Notes cell is redacted in the kept-current line  <-- pinned defect")
     check(len(_short(("x" * 100,))) == 60, "long keys are shortened for the report")
     check(_short(("x" * 60,)) == "x" * 60, "a key of exactly 60 characters is not shortened")
     many["lost"] = ["l%d" % i for i in range(20)]

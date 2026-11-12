@@ -179,18 +179,18 @@ PASS  the OBJECTID 4 mark belongs to a different finding after the rebuild  <-- 
 ...
 PASS  the footer of a failing harness names the failures and exits 1
 --------------------------------------------------------------------
-383 assertions, 0 failed
+386 assertions, 0 failed
 ```
 
 The block above elides the middle of the run with `...`. The first lines, the last PASS line
-and the footer are verbatim. Run the command to see all 383 lines.
+and the footer are verbatim. Run the command to see all 386 lines.
 
 Every fixture is synthetic. The self-test also runs the script as a separate process, writes
 real CSV files in a scratch directory, and reads back the files it wrote. Branch coverage of
 the file is 100 percent, measured with `coverage run --branch triage_carry_forward.py --self-test`
-(916 statements, 184 branches, none missed). One exclusion applies: the last line,
+(923 statements, 184 branches, none missed). One exclusion applies: the last line,
 `if __name__ == "__main__":`, carries `# pragma: no branch`, because its false branch is
-unreachable when the file is run. The count is 383 on Windows (Python 3.9, 3.10, 3.12 and 3.13) and on
+unreachable when the file is run. The count is 386 on Windows (Python 3.9, 3.10, 3.12 and 3.13) and on
 Linux (Python 3.9, 3.10, 3.11, 3.12 and 3.13). No assertion depends on the platform.
 
 ## Requirements
@@ -405,12 +405,15 @@ carries, and the run exits 1 until you pass `--accept-shifted`.
   fingerprint is NFKC folded, case folded and whitespace collapsed, and a masked column shows
   `#` where digits were, so `ADDR-02` prints as `addr-02`. A key cell that holds a control or
   escape character may still reach the terminal. The LOST and conflict lines cut the joined key
-  to 60 characters, not each cell. A key column that holds a secret, such as a connection
-  string in a message, sends that text to the terminal and any log; redirect or scrub the
-  report when key columns may hold secrets. This is not covered by the self-test.
+  to 60 characters, not each cell. Before the cut, the tool hides the value of a cell that has
+  the form `token=...`, `password: ...`, `secret=...`, `api_key=...`, `access_key=...`,
+  `private_key=...`, `credential=...`, `authorization=...`, `bearer ...` or `signature=...`, and the password in
+  `://user:password@host`. The report then shows `token=<redacted>`. This is a pattern match. A secret with no such label,
+  or a cell with a different label, still prints, so redirect or scrub the report when key
+  columns may hold secrets. The self-test pins the patterns, not the absence of every secret.
 - The LOST line for a current row that already holds a different mark prints that row's Status
-  and Notes text in full, not cut to 60 characters, so a long or sensitive Notes cell reaches
-  the terminal and any log unchanged.
+  and Notes text in full, not cut to 60 characters, after the same redaction. A long or
+  sensitive Notes cell without a credential label reaches the terminal and any log unchanged.
 - `--out` is opened for exclusive creation, but the tool does not test that the target is a
   regular file. On Windows, `--out nul` can report success and keep nothing; NUL is a reserved
   device name there (see References). This is not covered by the self-test.
@@ -466,13 +469,8 @@ carries, and the run exits 1 until you pass `--accept-shifted`.
 - Ctrl-C is not handled, so Python prints a traceback. A closed stdout pipe on Windows ended a
   large report with exit 120 and `Exception ignored on flushing sys.stdout`, not the tool's own
   exit 5; this was run once on Windows Python 3.13 and not on Linux.
-- The statement that no similar repository exists rests on one GitHub search on 2026-11-11. It
-  is not proof.
-- The SarifHub status table (phases 5 and 6 listed as Planned) and the GitHub search are
-  dated 2026-11-11. Neither was checked again later, so read both claims as true on that date only.
-- The 383 count was reproduced again on Windows Python 3.13, 3.10 and 3.9 and on Linux Python
-  3.12 only. Windows 3.11 and 3.12 and Linux 3.9, 3.10, 3.11 and 3.13 were not run again in the
-  last audit.
+- The statement that no similar repository exists is based on one GitHub search on 2026-11-11.
+- The SarifHub status table (phases 5 and 6 listed as Planned) is dated 2026-11-11.
 - No command-line `--apply` round trip with injected cells was run in the last audit. The same
   check ran in process with `write_rows` and `read_rows`: tab, CR, `@`, `+` and `-` cells were
   guarded, `-1,234` was guarded, `'-3` and `'=q` survived the round trip, and a numeric
@@ -482,10 +480,15 @@ carries, and the run exits 1 until you pass `--accept-shifted`.
 - The `open(..., "x")` exclusive-create path with its `FileExistsError`, and `os.path.realpath`
   for the `--out` same-file check, have no cited source in References.
 - Identical masked findings that carry different marks are refused as `conflict`, and each such
-  row exits 1. On a synthetic 100,000-row table with 33,334 marked rows, every row came back
-  as `conflict` in 2.4 seconds. A table with many duplicate findings will refuse many marks.
-- Ctrl-C, the closed stdout pipe exit 120, a partial `--out` write, and the hard-link and 8.3
-  bypass of the `--out` check were not run again in the last audit.
+  row exits 1. A table with many duplicate findings will refuse many marks.
+- The `--out` check compares real paths only, so an NTFS alternate data stream name such as
+  `prior.csv:x` is not recognised as the input file. Creation is exclusive, so the input is
+  not overwritten.
+- Excel's plain "CSV (Comma delimited)" save is cp1252, not UTF-8. Re-save as "CSV UTF-8"
+  before you run, because the refusal shows only the codec error.
+- A prior file with no Notes column, such as a file with a Status column only, is refused as
+  exit 2 `notes field Notes is not a column of the prior file`. Pass `--notes-field` with a
+  column that exists, or add an empty Notes column.
 
 ## How each claim was exercised
 
@@ -520,7 +523,7 @@ carries, and the run exits 1 until you pass `--accept-shifted`.
 | A marked finding that is gone exits 1 until `--accept-resolved`, for a truncated export, a partial rename and a count that moved in a key column | Self-test, `exit_code` and CLI assertions, the three pinned runs |
 | A Notes cell that is an apostrophe and a number, and a raw `'=x` or `'-12`, round-trip as described in Limits | Self-test, the per-field round trip and the raw apostrophe assertions |
 | A cell with a NUL byte is read on 3.13 and refused on 3.9 | Run by hand on one file, not in the self-test |
-| Linux and Windows agree | 383 assertions on Python 3.9, 3.10, 3.12 and 3.13 on Windows and 3.9, 3.10, 3.11, 3.12 and 3.13 on Linux |
+| Linux and Windows agree | 386 assertions on Python 3.9, 3.10, 3.12 and 3.13 on Windows and 3.9, 3.10, 3.11, 3.12 and 3.13 on Linux |
 
 ## References
 
